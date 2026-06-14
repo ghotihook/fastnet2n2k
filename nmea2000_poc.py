@@ -109,8 +109,9 @@ def main() -> int:
             delay = next_send - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
-            else:
-                next_send = time.monotonic()   # fell behind — resync without bursting
+            elif delay < -period:
+                next_send = time.monotonic()   # long stall (>1 period) — give up catching up
+            # else: slightly late — send now and keep the grid so the average rate holds
     except KeyboardInterrupt:
         print("\nStopping.")
     finally:
