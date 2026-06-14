@@ -94,7 +94,6 @@ Options:
 |---|---|---|
 | `--serial DEV` / `--file PATH` | — | input source (one is required) |
 | `--channel` | `can0` | SocketCAN interface |
-| `--n2k-src` | `22` | preferred N2K source address (0–251) |
 | `--n2k-priority` | per-PGN standard | override CAN priority (0–7, 0=highest) for **all** transmitted frames; **if omitted, each PGN keeps its standard priority** (see the PGN table above) |
 | `--unique` | from hostname | device NAME unique number |
 | `--live-data` | off | print the live channel table to the console once per second |

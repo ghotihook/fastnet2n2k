@@ -42,8 +42,6 @@ def parse_args() -> argparse.Namespace:
     src.add_argument("--serial", metavar="DEV", help="Fastnet serial port, e.g. /dev/ttyUSB0")
     src.add_argument("--file", metavar="PATH", help="Captured Fastnet hex (.txt) to replay")
     p.add_argument("--channel", default="can0", help="SocketCAN interface (default: can0)")
-    p.add_argument("--n2k-src", type=lambda x: int(x, 0), default=22,
-                   help="Preferred N2K source address 0–251 (default: 22)")
     p.add_argument("--n2k-priority", type=lambda x: int(x, 0), default=None,
                    help="Override the CAN priority (0–7, 0=highest) for ALL transmitted "
                         "frames. Default: each PGN uses its NMEA2000 standard priority.")
@@ -63,7 +61,6 @@ def parse_args() -> argparse.Namespace:
 def make_device(args: argparse.Namespace) -> N2KDevice:
     return N2KDevice.for_python_can(
         "socketcan", args.channel,
-        preferred_address=args.n2k_src,
         unique_number=args.unique,
         manufacturer_code=2046,    # open-source / unregistered
         device_function=190,       # 190 = Navigation
@@ -105,8 +102,8 @@ async def run(args: argparse.Namespace) -> int:
     if args.n2k_priority is not None:
         mapping.set_priority_override(args.n2k_priority)
         logger.info("Overriding priority for all frames: %d", args.n2k_priority)
-    logger.info("Transmitting on %s (preferred src=%d); reading Fastnet from %s",
-                args.channel, args.n2k_src, args.serial or args.file)
+    logger.info("Transmitting on %s (src=%d); reading Fastnet from %s",
+                args.channel, device.address, args.serial or args.file)
     try:
         await asyncio.wait_for(device.wait_ready(), timeout=10)
         logger.info("Address claimed: %d", device.address)
