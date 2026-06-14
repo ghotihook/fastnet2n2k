@@ -1,0 +1,33 @@
+# systemd unit for the fastnet2n2k bridge.
+#
+# Edit User=, the paths, and the --serial device to match your install, then:
+#   sudo cp fastnet2n2k.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fastnet2n2k.service
+#   journalctl -u fastnet2n2k.service -f
+#
+# The service runs as an unprivileged user; the ExecStartPre line uses systemd's
+# "+" prefix so only the CAN bring-up runs as root. Make sure that user is in the
+# "dialout" group so it can read the Fastnet serial device:
+#   sudo usermod -aG dialout <user>
+
+[Unit]
+Description=Fastnet to NMEA2000 bridge
+After=network.target
+
+[Service]
+Type=simple
+User=alex060
+WorkingDirectory=/home/alex060/fastnet2n2k
+
+# Bring can0 up at the NMEA2000 bitrate before starting (run as root via "+").
+# restart-ms 100 lets the controller auto-recover from a bus-off.
+ExecStartPre=+/bin/sh -c 'ip link set can0 down 2>/dev/null; ip link set can0 up type can bitrate 250000 restart-ms 100'
+
+ExecStart=/home/alex060/fastnet2n2k/.venv/bin/python -m fastnet2n2k --serial /dev/ttyUSB0 --channel can0
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
