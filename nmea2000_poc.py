@@ -12,6 +12,7 @@ Then::
     python nmea2000_poc.py --channel can0 --heading 90        # ~10 Hz loop
     python nmea2000_poc.py --channel can0 --heading 90 --once  # single frame
     python nmea2000_poc.py --channel can0 --rate 0             # unthrottled (find ceiling)
+    python nmea2000_poc.py --channel can0 --cycle --rate 0     # sweep 0–359° as fast as possible
 
 Prints the actual achieved rate once per second so the real on-bus output can be read
 directly, independent of any downstream gateway/monitor.
@@ -33,6 +34,10 @@ def parse_args() -> argparse.Namespace:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--channel", default="can0", help="SocketCAN interface (default: can0)")
     p.add_argument("--heading", type=float, default=0.0, help="Heading in degrees (default: 0)")
+    p.add_argument("--cycle", action="store_true",
+                   help="Sweep heading through 0–359° (1° per frame, wrapping) starting "
+                        "from --heading, instead of a fixed value; pair with --rate 0 "
+                        "to cycle as fast as possible")
     p.add_argument("--ref", choices=("true", "magnetic"), default="true",
                    help="Heading reference (default: true)")
     p.add_argument("--rate", type=float, default=10.0,
@@ -47,8 +52,12 @@ def build_heading(heading_deg: float, ref: str, sid: int):
     msg = pgns.decode_pgn_127250(0, 0)
     msg.source = 0
     msg.priority = 2
+    # Deviation and variation are sent as "not available" (None → all-1s sentinel),
+    # not 0. We have no source for them, and a 0 variation on a magnetic heading
+    # would falsely assert magnetic == true.
     values = {"sid": sid, "heading": radians(heading_deg),
-              "reference": "Magnetic" if ref == "magnetic" else "True"}
+              "reference": "Magnetic" if ref == "magnetic" else "True",
+              "deviation": None, "variation": None}
     for f in msg.fields:
         if f.id in values:
             f.raw_value = None
@@ -75,7 +84,9 @@ async def run(args: argparse.Namespace) -> int:
 
     period = 1.0 / args.rate if args.rate > 0 else 0.0
     sid = 0
-    print(f"Sending PGN 127250 Heading={args.heading}° ({args.ref}) on {args.channel}"
+    heading_deg = args.heading
+    heading_desc = f"{args.heading:g}–359° cycling" if args.cycle else f"{args.heading:g}°"
+    print(f"Sending PGN 127250 Heading={heading_desc} ({args.ref}) on {args.channel}"
           + (" once" if args.once else f" at {args.rate:g} Hz")
           + f"  src={device.address}  (Ctrl-C to stop)")
 
@@ -86,7 +97,7 @@ async def run(args: argparse.Namespace) -> int:
     try:
         while True:
             try:
-                await device.send(build_heading(args.heading, args.ref, sid))
+                await device.send(build_heading(heading_deg, args.ref, sid))
                 sent_in_window += 1
             except Exception as exc:   # noqa: BLE001 — bus-off / interface drop
                 if time.monotonic() - last_error >= 5.0:
@@ -94,6 +105,8 @@ async def run(args: argparse.Namespace) -> int:
                           file=sys.stderr, flush=True)
                     last_error = time.monotonic()
             sid = (sid + 1) % 253
+            if args.cycle:
+                heading_deg = (heading_deg + 1) % 360
             if args.once:
                 break
             now = time.monotonic()
