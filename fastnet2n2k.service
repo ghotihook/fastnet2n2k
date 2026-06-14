@@ -24,7 +24,7 @@ WorkingDirectory=/home/alex060/fastnet2n2k
 # restart-ms 100 lets the controller auto-recover from a bus-off.
 ExecStartPre=+/bin/sh -c 'ip link set can0 down 2>/dev/null; ip link set can0 up type can bitrate 250000 restart-ms 100'
 
-ExecStart=/home/alex060/fastnet2n2k/.venv/bin/python -m fastnet2n2k --serial /dev/ttyUSB0 --channel can0
+ExecStart=/home/alex060/fastnet2n2k/.venv/bin/python -m fastnet2n2k --serial /dev/ttySTM3 --channel can0
 
 Restart=on-failure
 RestartSec=5
