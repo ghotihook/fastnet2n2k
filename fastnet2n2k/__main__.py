@@ -26,6 +26,24 @@ from .live_store import live_data, update_live_data
 logger = logging.getLogger("fastnet2n2k")
 
 
+class _QuietTransientCanErrors(logging.Filter):
+    """Drop the nmea2000 client's per-failure spam when the CAN transmit buffer is
+    full (ENOBUFS / error 105) — including the ``exc_info`` tracebacks it logs.
+
+    These fire on every frame when the bus can't drain (e.g. no other node is
+    acknowledging), flooding the journal. The library already retries internally,
+    and ``mapping.process_channel`` logs a single throttled summary when a send
+    ultimately fails, so the per-attempt warnings add only noise. Genuine
+    connection-lost errors are logged at ERROR and pass through untouched.
+    """
+
+    _NOISE = ("transmit queue full", "send failed without reconnecting")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage().lower()
+        return not any(phrase in msg for phrase in self._NOISE)
+
+
 def fnv_unique() -> int:
     """A stable 21-bit unique number derived from the hostname, so two boards don't
     default to the same NMEA2000 NAME."""
@@ -145,6 +163,8 @@ def main() -> int:
         level=level, format="%(asctime)s [%(name)s] %(levelname)-5s %(message)s")
     # The nmea2000 client is chatty at DEBUG; keep it in step with our level.
     logging.getLogger("nmea2000").setLevel(level)
+    # …but drop its transmit-buffer-full tracebacks; we summarise those ourselves.
+    logging.getLogger("nmea2000.ioclient").addFilter(_QuietTransientCanErrors())
     try:
         return asyncio.run(run(args))
     except KeyboardInterrupt:
