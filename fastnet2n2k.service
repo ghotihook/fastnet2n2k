@@ -1,33 +1,45 @@
 # systemd unit for the fastnet2n2k bridge.
 #
-# Edit User=, the paths, and the --serial device to match your install, then:
+# Install into a dedicated system venv (NOT a pipx ~/.local install — a root-run
+# service can't rely on a user's PATH):
+#   sudo python3 -m venv /opt/fastnet2n2k
+#   sudo /opt/fastnet2n2k/bin/pip install fastnet2n2k
+#
+# Then edit the --serial device below to match your install, and:
 #   sudo cp fastnet2n2k.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now fastnet2n2k.service
 #   journalctl -u fastnet2n2k.service -f
-#
-# The service runs as an unprivileged user; the ExecStartPre line uses systemd's
-# "+" prefix so only the CAN bring-up runs as root. Make sure that user is in the
-# "dialout" group so it can read the Fastnet serial device:
-#   sudo usermod -aG dialout <user>
 
 [Unit]
-Description=Fastnet to NMEA2000 bridge
+Description=fastnet2n2k Service
 After=network.target
 
 [Service]
 Type=simple
-User=alex060
-WorkingDirectory=/home/alex060/fastnet2n2k
+User=root
+WorkingDirectory=/opt/fastnet2n2k
 
-# Bring can0 up at the NMEA2000 bitrate before starting (run as root via "+").
+# Bring can0 up at the NMEA2000 bitrate before starting.
 # restart-ms 100 lets the controller auto-recover from a bus-off.
-ExecStartPre=+/bin/sh -c 'ip link set can0 down 2>/dev/null; ip link set can0 up type can bitrate 250000 restart-ms 100'
+ExecStartPre=/bin/sh -c 'ip link set can0 down 2>/dev/null; ip link set can0 up type can bitrate 250000 restart-ms 100'
 
-ExecStart=/home/alex060/fastnet2n2k/.venv/bin/python -m fastnet2n2k --serial /dev/ttySTM3 --channel can0
+ExecStart=/opt/fastnet2n2k/bin/fastnet2n2k --serial /dev/ttyUSB0 --channel can0
+Restart=always
+RestartSec=10
 
-Restart=on-failure
-RestartSec=5
+# === RESOURCE LIMITS ===
+OOMScoreAdjust=-700
+OOMPolicy=continue
+MemoryMax=128M
+MemoryHigh=96M
+TimeoutStopSec=30
+
+# === LOGGING ===
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fastnet2n2k
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target

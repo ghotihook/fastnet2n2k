@@ -18,7 +18,7 @@ import can
 from fastnet_decoder import FrameBuffer
 from nmea2000.device import N2KDevice
 
-from . import mapping
+from . import __version__, mapping
 from .display import print_live_data
 from .input_source import initialize_input_source, read_input_source
 from .live_store import live_data, update_live_data
@@ -67,8 +67,8 @@ def make_device(args: argparse.Namespace) -> N2KDevice:
         device_class=60,           # 60 = Navigation
         industry_group=4,          # 4 = Marine
         model_id="fastnet2n2k",
-        model_version="0.1.1",
-        software_version_code="0.1.1",
+        model_version=__version__,
+        software_version_code=__version__,
         transmit_pgns=mapping.TX_PGNS,
     )
 
