@@ -32,12 +32,13 @@ so when the instruments go quiet the output stops and consumers time the data ou
 | Position | 129025 | |
 | Sea / air temperature | 130312 | °C/°F→Kelvin |
 | Barometric pressure | 130314 | mbar→Pa |
+| Tidal set & drift | 129291 | hand-built frame; set deg→rad, drift kn→m/s; reference per layout |
 
 **Units** are converted to NMEA2000 SI. **Sign** comes straight from pyfastnet's
 decoded value. **True/Magnetic** is read from the pyfastnet `layout` field (the only
 place it exists); a bearing whose layout can't be resolved is skipped, never guessed.
-Tidal Set/Drift (129291) and the B&G proprietary raw PGNs (65280–65282) are
-deferred (the `n2k` library has no builders for them yet).
+The B&G proprietary raw PGNs (65280–65282) are deferred (the `n2k` library has no
+builders for them yet).
 
 ## Install
 
@@ -87,6 +88,7 @@ Options:
 | `--channel` | `can0` | SocketCAN interface |
 | `--n2k-src` | `22` | preferred N2K source address (0–251) |
 | `--unique` | from hostname | device NAME unique number |
+| `--live-data` | off | print the live channel table to the console once per second |
 | `-v` / `--verbose` | off | debug logging |
 
 ## Verify

@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from math import radians
 
 from n2k import types as n2k_types
+from n2k.message import Message
 from n2k.messages import (
     Attitude,
     BatteryStatus,
@@ -296,6 +297,31 @@ def process_rate_of_turn():
         sid=_next_sid(), rate_of_turn=radians(yr)))
 
 
+# PGN 129291 Set & Drift, Rapid Update — no n2k builder, so build it by hand.
+# Layout (canboat): SID(1) | SetReference 2b + reserved 6b | Set 16b@0.0001rad |
+# Drift 16b@0.01 m/s | reserved 16b  = 8 bytes (single frame).
+PGN_SET_DRIFT = 129291
+
+
+def process_set_drift():
+    set_deg = get_live_data("Tidal Set")     # degrees (direction the tide flows toward)
+    drift   = get_live_data("Tidal Drift")   # knots
+    if set_deg is None and drift is None:
+        return None
+    ref = _heading_ref("Tidal Set")          # T/M from the Tidal Set layout
+    if ref is None:
+        return None
+    msg = Message()
+    msg.pgn = PGN_SET_DRIFT
+    msg.priority = 3
+    msg.add_byte_uint(_next_sid())
+    msg.add_byte_uint((int(ref) & 0x03) | 0xFC)   # set reference + reserved bits
+    msg.add_2_byte_udouble(radians(set_deg % 360) if set_deg is not None else None, 0.0001)
+    msg.add_2_byte_udouble(max(0.0, drift) * KN_MS if drift is not None else None, 0.01)
+    msg.add_2_byte_uint(0xFFFF)               # reserved
+    return msg
+
+
 def process_position():
     latlon = get_live_display("LatLon")          # e.g. "3352.450S15113.920E"
     if not latlon:
@@ -352,9 +378,9 @@ _CHANNEL_MAP = {
     "Barometric Pressure":          process_pressure,
     "Yaw rate":                     process_rate_of_turn,
     "Cross Track Error":            process_xte,
+    "Tidal Set":                    process_set_drift,
+    "Tidal Drift":                  "covered by 'Tidal Set' (same frame)",
     # ── Deferred (no n2k builder yet; need manual Message.add_*) ──
-    "Tidal Set":                    "TODO: Set & Drift PGN 129291 (deferred)",
-    "Tidal Drift":                  "TODO: Set & Drift PGN 129291 (deferred)",
     "Boatspeed (Raw)":             "TODO: proprietary PGN 65282 (deferred)",
     "Heading (Raw)":               "TODO: proprietary PGN 65281 (deferred)",
     "Apparent Wind Speed (Raw)":   "TODO: proprietary PGN 65280 (deferred)",

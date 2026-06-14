@@ -92,6 +92,19 @@ def test_cog_sog_prefers_true():
     assert c.sog == pytest.approx(1.7 * KN_MS, abs=0.01)
 
 
+def test_set_drift_manual_pgn():
+    msg = mapping.process_set_drift()
+    assert msg.pgn == 129291
+    assert len(msg.data) == 8
+    # Decode the hand-built frame: SID | ref(2b) | set(0.0001rad) | drift(0.01 m/s) | rsv
+    ref = msg.data[1] & 0x03
+    set_raw   = int.from_bytes(msg.data[2:4], "little")
+    drift_raw = int.from_bytes(msg.data[4:6], "little")
+    assert ref == int(t.N2kHeadingReference.magnetic)            # "°M" layout
+    assert math.degrees(set_raw * 0.0001) == pytest.approx(277, abs=0.05)
+    assert drift_raw * 0.01 == pytest.approx(0.78 * KN_MS, abs=0.01)
+
+
 def test_sea_temp_c_to_kelvin():
     temp = parse_n2k_temperature(mapping.process_sea_temp())
     assert temp.temp_source == t.N2kTempSource.SeaTemperature

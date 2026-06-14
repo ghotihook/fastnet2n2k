@@ -10,12 +10,14 @@ Bring the CAN interface up first:
 import argparse
 import logging
 import sys
+import time
 
 import can
 import n2k
 from fastnet_decoder import FrameBuffer
 
 from . import mapping
+from .display import print_live_data
 from .input_source import initialize_input_source, read_input_source
 from .live_store import live_data, update_live_data
 
@@ -24,7 +26,7 @@ logger = logging.getLogger("fastnet2n2k")
 # PGNs this node transmits — advertised in its 126464 PGN-list response.
 _TX_PGNS = [
     127245, 127250, 127251, 127257, 127508, 128000, 128259, 128267,
-    128275, 129025, 129026, 129283, 130306, 130312, 130314,
+    128275, 129025, 129026, 129283, 129291, 130306, 130312, 130314,
 ]
 
 
@@ -39,6 +41,8 @@ def parse_args() -> argparse.Namespace:
                    help="Preferred N2K source address 0–251 (default: 22)")
     p.add_argument("--unique", type=int, default=fnv_unique(),
                    help="Device NAME unique number (default: derived from hostname)")
+    p.add_argument("--live-data", action="store_true",
+                   help="Print the live channel table to the console once per second")
     p.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
     return p.parse_args()
 
@@ -92,18 +96,23 @@ def main() -> int:
 
     source, is_file = initialize_input_source(serial_port=args.serial, file_path=args.file)
     fb = FrameBuffer()
+    last_print = time.monotonic()
     try:
         while True:
             data = read_input_source(source, is_file)
-            if data is None:
-                if is_file:
-                    logger.info("File replay complete")
-                    break
-                continue
-            fb.add_to_buffer(data)
-            fb.get_complete_frames()
-            while not fb.frame_queue.empty():
-                _dispatch_frame(fb.frame_queue.get())
+            if data is not None:
+                fb.add_to_buffer(data)
+                fb.get_complete_frames()
+                while not fb.frame_queue.empty():
+                    _dispatch_frame(fb.frame_queue.get())
+
+            if args.live_data and time.monotonic() - last_print >= 1:
+                print_live_data(fb)
+                last_print = time.monotonic()
+
+            if is_file and data is None:
+                logger.info("File replay complete")
+                break
     except KeyboardInterrupt:
         logger.info("Stopping")
     finally:
