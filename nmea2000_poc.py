@@ -92,6 +92,10 @@ def main() -> int:
     # Schedule against an absolute monotonic deadline so the send work and sleep
     # overshoot don't accumulate into rate drift.
     next_send = time.monotonic()
+    # Measure the actual achieved send rate over a rolling window.
+    REPORT_INTERVAL = 1.0
+    sent_in_window = 0
+    window_start = time.monotonic()
     try:
         while True:
             msg = create_n2k_heading_message(Heading(
@@ -103,10 +107,18 @@ def main() -> int:
             ))
             node.send_msg(msg)
             sid = (sid + 1) % 253      # SID wraps 0..252; 253-255 are reserved
+            sent_in_window += 1
             if args.once:
                 break
+            now = time.monotonic()
+            if now - window_start >= REPORT_INTERVAL:
+                measured = sent_in_window / (now - window_start)
+                print(f"  measured {measured:6.1f} Hz  (target "
+                      + (f"{args.rate:g}" if args.rate > 0 else "max") + ")", flush=True)
+                sent_in_window = 0
+                window_start = now
             next_send += period
-            delay = next_send - time.monotonic()
+            delay = next_send - now
             if delay > 0:
                 time.sleep(delay)
             elif delay < -period:
