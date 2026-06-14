@@ -19,7 +19,7 @@ import nmea2000.encoder_formats  # noqa: F401  (registers formats)
 from fastnet2n2k import mapping
 from fastnet2n2k.live_store import live_data, update_live_data
 
-CAPTURES = "/Users/alex060/Prod/pyfastnet/temp"
+CAPTURES = os.path.join(os.path.dirname(__file__), "data")
 KN_MS = 0.514444
 _ENC = NMEA2000Encoder(N2KFormat.CAN_FRAME_ASCII)
 

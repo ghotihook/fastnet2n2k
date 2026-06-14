@@ -82,11 +82,18 @@ async def run(args: argparse.Namespace) -> int:
     next_send = time.monotonic()
     sent_in_window = 0
     window_start = time.monotonic()
+    last_error = 0.0
     try:
         while True:
-            await device.send(build_heading(args.heading, args.ref, sid))
+            try:
+                await device.send(build_heading(args.heading, args.ref, sid))
+                sent_in_window += 1
+            except Exception as exc:   # noqa: BLE001 — bus-off / interface drop
+                if time.monotonic() - last_error >= 5.0:
+                    print(f"  send failed ({exc}) — continuing; device will reconnect",
+                          file=sys.stderr, flush=True)
+                    last_error = time.monotonic()
             sid = (sid + 1) % 253
-            sent_in_window += 1
             if args.once:
                 break
             now = time.monotonic()

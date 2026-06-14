@@ -48,7 +48,9 @@ def parse_args() -> argparse.Namespace:
                    help="Device NAME unique number (default: derived from hostname)")
     p.add_argument("--live-data", action="store_true",
                    help="Print the live channel table to the console once per second")
-    p.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
+    p.add_argument("--log-level", default="INFO",
+                   choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+                   help="Logging verbosity (default: INFO)")
     return p.parse_args()
 
 
@@ -62,8 +64,8 @@ def make_device(args: argparse.Namespace) -> N2KDevice:
         device_class=60,           # 60 = Navigation
         industry_group=4,          # 4 = Marine
         model_id="fastnet2n2k",
-        model_version="0.1.0",
-        software_version_code="0.1.0",
+        model_version="0.1.1",
+        software_version_code="0.1.1",
         transmit_pgns=mapping.TX_PGNS,
     )
 
@@ -78,14 +80,20 @@ async def _dispatch_frame(frame: dict) -> None:
 
 
 async def run(args: argparse.Namespace) -> int:
-    device = make_device(args)
     try:
-        await device.start()
+        device = make_device(args)
     except (OSError, can.CanError) as exc:
-        logger.error("Could not open CAN interface '%s': %s", args.channel, exc)
+        logger.error("Could not create CAN interface '%s': %s", args.channel, exc)
         logger.error("Bring it up first: sudo ip link set %s up type can bitrate 250000",
                      args.channel)
         return 1
+
+    # connect() retries with backoff until the interface is available, so this waits
+    # (rather than failing) if can0 isn't up yet — the right behaviour for a boat bus
+    # that may power-cycle. Watch the logs; raise --log-level if it seems stuck.
+    logger.info("Connecting to CAN interface %s (waiting if it isn't up yet)…",
+                args.channel)
+    await device.start()
 
     mapping.set_device(device)
     logger.info("Transmitting on %s (preferred src=%d); reading Fastnet from %s",
@@ -126,9 +134,11 @@ async def run(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
+    level = getattr(logging, args.log_level)
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)-5s %(message)s")
+        level=level, format="%(asctime)s [%(name)s] %(levelname)-5s %(message)s")
+    # The nmea2000 client is chatty at DEBUG; keep it in step with our level.
+    logging.getLogger("nmea2000").setLevel(level)
     try:
         return asyncio.run(run(args))
     except KeyboardInterrupt:

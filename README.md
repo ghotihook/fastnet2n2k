@@ -92,7 +92,12 @@ Options:
 | `--n2k-src` | `22` | preferred N2K source address (0–251) |
 | `--unique` | from hostname | device NAME unique number |
 | `--live-data` | off | print the live channel table to the console once per second |
-| `-v` / `--verbose` | off | debug logging |
+| `--log-level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+
+**CAN failure handling:** the device reconnects automatically. If `can0` isn't up at
+start it waits (logging retries) rather than exiting; if the bus drops or goes bus-off
+mid-run, sends fail quietly (logged at most every 5 s) and resume once it recovers — the
+bridge keeps running. Use `--log-level DEBUG` to see connection/retry detail.
 
 ## Verify
 

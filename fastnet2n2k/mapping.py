@@ -33,6 +33,8 @@ KN_MS             = 0.514444
 
 _channel_last_sent: dict = {}
 _device = None
+_last_send_error_log = 0.0
+_SEND_ERROR_LOG_INTERVAL = 5.0
 
 
 def set_device(device) -> None:
@@ -356,6 +358,16 @@ async def process_channel(channel_name, old_entry):
     if msg is None:
         return
     if _device is None or not _device.ready:
-        return   # address not claimed yet — retry on the next update
+        return   # not connected / address not claimed — retry on the next update
     _channel_last_sent[channel_name] = now
-    await _device.send(msg)
+    try:
+        await _device.send(msg)
+    except Exception as exc:   # noqa: BLE001 — bus-off / interface drop / reconnect
+        # The N2KDevice client reconnects underneath; don't let a transient CAN
+        # failure tear down the bridge. Log at most once per interval to avoid
+        # flooding while the bus is down.
+        global _last_send_error_log
+        if now - _last_send_error_log >= _SEND_ERROR_LOG_INTERVAL:
+            logger.warning("CAN send failed (%s) — continuing; the device will reconnect",
+                           exc)
+            _last_send_error_log = now
