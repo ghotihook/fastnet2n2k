@@ -89,6 +89,9 @@ def main() -> int:
     print(f"Sending PGN 127250 Heading={args.heading}° ({args.ref}) on "
           f"{args.channel}" + (" once" if args.once else f" at {args.rate} Hz")
           + "  (Ctrl-C to stop)")
+    # Schedule against an absolute monotonic deadline so the send work and sleep
+    # overshoot don't accumulate into rate drift.
+    next_send = time.monotonic()
     try:
         while True:
             msg = create_n2k_heading_message(Heading(
@@ -102,7 +105,12 @@ def main() -> int:
             sid = (sid + 1) % 253      # SID wraps 0..252; 253-255 are reserved
             if args.once:
                 break
-            time.sleep(period)
+            next_send += period
+            delay = next_send - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                next_send = time.monotonic()   # fell behind — resync without bursting
     except KeyboardInterrupt:
         print("\nStopping.")
     finally:
