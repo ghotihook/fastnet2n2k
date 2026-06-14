@@ -10,8 +10,8 @@ The CoreMP135 runs Linux on an STM32MP135 and exposes its two FDCAN interfaces
 (SIT1051T transceivers) as the SocketCAN netdevs `can0` (FDCAN1, PE3/PE10) and
 `can1` (FDCAN2, PG0/PE0). NMEA2000 runs at **250 kbit/s** with 29-bit extended IDs.
 Message encoding, CAN-ID construction, fast-packet framing and ISO address claiming
-are handled by the [`n2k`](https://github.com/finnboeger/NMEA2000) library on top of
-`python-can`'s socketcan backend.
+are handled by the [`nmea2000`](https://github.com/tomer-w/nmea2000) library (canboat-
+based) on top of `python-can`'s socketcan backend.
 
 ## What it sends
 
@@ -32,13 +32,16 @@ so when the instruments go quiet the output stops and consumers time the data ou
 | Position | 129025 | |
 | Sea / air temperature | 130312 | °C/°F→Kelvin |
 | Barometric pressure | 130314 | mbar→Pa |
-| Tidal set & drift | 129291 | hand-built frame; set deg→rad, drift kn→m/s; reference per layout |
+| Tidal set & drift | 129291 | set deg→rad, drift kn→m/s; reference per layout |
 
 **Units** are converted to NMEA2000 SI. **Sign** comes straight from pyfastnet's
 decoded value. **True/Magnetic** is read from the pyfastnet `layout` field (the only
 place it exists); a bearing whose layout can't be resolved is skipped, never guessed.
-The B&G proprietary raw PGNs (65280–65282) are deferred (the `n2k` library has no
-builders for them yet).
+The B&G proprietary raw PGNs (65280–65282) are deferred (manufacturer-specific layout).
+
+> **WiFi gateways:** if you feed a WiFi NMEA2000 gateway downstream, configure it for
+> **unicast** UDP, not broadcast — WiFi broadcast is unacknowledged and silently drops
+> frames even at low rates.
 
 ## Install
 

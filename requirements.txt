@@ -1,4 +1,4 @@
-n2k>=0.5.0
+nmea2000>=2026.5
 python-can>=4.5
 pyfastnet>=2.0.17
 pyserial>=3.5

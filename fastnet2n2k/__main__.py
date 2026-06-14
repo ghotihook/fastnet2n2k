@@ -8,13 +8,15 @@ Bring the CAN interface up first:
 """
 
 import argparse
+import asyncio
 import logging
+import socket
 import sys
 import time
 
 import can
-import n2k
 from fastnet_decoder import FrameBuffer
+from nmea2000.device import N2KDevice
 
 from . import mapping
 from .display import print_live_data
@@ -23,11 +25,14 @@ from .live_store import live_data, update_live_data
 
 logger = logging.getLogger("fastnet2n2k")
 
-# PGNs this node transmits — advertised in its 126464 PGN-list response.
-_TX_PGNS = [
-    127245, 127250, 127251, 127257, 127508, 128000, 128259, 128267,
-    128275, 129025, 129026, 129283, 129291, 130306, 130312, 130314,
-]
+
+def fnv_unique() -> int:
+    """A stable 21-bit unique number derived from the hostname, so two boards don't
+    default to the same NMEA2000 NAME."""
+    h = 2166136261
+    for b in socket.gethostname().encode():
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return h & 0x1FFFFF
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,64 +52,61 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def fnv_unique() -> int:
-    """A stable-ish 21-bit unique number derived from the hostname, so two boards
-    don't both default to the same NMEA2000 NAME."""
-    import socket
-    h = 2166136261
-    for b in socket.gethostname().encode():
-        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
-    return h & 0x1FFFFF
-
-
-def make_node(bus: can.BusABC, src: int, unique: int) -> n2k.Node:
-    dev = n2k.DeviceInformation(
-        unique_number=unique,
-        manufacturer_code=2046,   # open-source / unregistered
-        device_function=190,      # 190 = Navigation / Bridge
-        device_class=60,          # 60 = Navigation
-        industry_group=4,         # 4 = Marine
+def make_device(args: argparse.Namespace) -> N2KDevice:
+    return N2KDevice.for_python_can(
+        "socketcan", args.channel,
+        preferred_address=args.n2k_src,
+        unique_number=args.unique,
+        manufacturer_code=2046,    # open-source / unregistered
+        device_function=190,       # 190 = Navigation
+        device_class=60,           # 60 = Navigation
+        industry_group=4,          # 4 = Marine
+        model_id="fastnet2n2k",
+        model_version="0.1.0",
+        software_version_code="0.1.0",
+        transmit_pgns=mapping.TX_PGNS,
     )
-    node = n2k.Node(bus, dev)
-    node.n2k_source = src
-    node.set_product_information("fastnet2n2k", "0.1.0", "POC", "00000000001", 2)
-    node.set_configuration_information()
-    node.transmit_messages.extend(_TX_PGNS)
-    return node
 
 
-def main() -> int:
-    args = parse_args()
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)-5s %(message)s")
+async def _dispatch_frame(frame: dict) -> None:
+    for channel_name, decoded in frame.get("values", {}).items():
+        old = live_data.get(channel_name)
+        old_copy = dict(old) if old else None
+        update_live_data(channel_name, decoded.get("channel_id"), decoded.get("value"),
+                         decoded.get("display_text"), decoded.get("layout"))
+        await mapping.process_channel(channel_name, old_copy)
 
+
+async def run(args: argparse.Namespace) -> int:
+    device = make_device(args)
     try:
-        bus = can.Bus(args.channel, interface="socketcan")
-    except OSError as exc:
+        await device.start()
+    except (OSError, can.CanError) as exc:
         logger.error("Could not open CAN interface '%s': %s", args.channel, exc)
         logger.error("Bring it up first: sudo ip link set %s up type can bitrate 250000",
                      args.channel)
         return 1
 
-    notifier = can.Notifier(bus, [])
-    node = make_node(bus, args.n2k_src, args.unique)
-    notifier.add_listener(node)
-    mapping.set_node(node)
-    logger.info("Transmitting on %s (src=%d); reading Fastnet from %s",
+    mapping.set_device(device)
+    logger.info("Transmitting on %s (preferred src=%d); reading Fastnet from %s",
                 args.channel, args.n2k_src, args.serial or args.file)
+    try:
+        await asyncio.wait_for(device.wait_ready(), timeout=10)
+        logger.info("Address claimed: %d", device.address)
+    except asyncio.TimeoutError:
+        logger.warning("Address claim not confirmed within 10s — continuing")
 
     source, is_file = initialize_input_source(serial_port=args.serial, file_path=args.file)
     fb = FrameBuffer()
     last_print = time.monotonic()
     try:
         while True:
-            data = read_input_source(source, is_file)
+            data = await asyncio.to_thread(read_input_source, source, is_file)
             if data is not None:
                 fb.add_to_buffer(data)
                 fb.get_complete_frames()
                 while not fb.frame_queue.empty():
-                    _dispatch_frame(fb.frame_queue.get())
+                    await _dispatch_frame(fb.frame_queue.get())
 
             if args.live_data and time.monotonic() - last_print >= 1:
                 print_live_data(fb)
@@ -116,21 +118,21 @@ def main() -> int:
     except KeyboardInterrupt:
         logger.info("Stopping")
     finally:
-        notifier.stop()
-        bus.shutdown()
+        await device.close()
         if not is_file:
             source.close()
     return 0
 
 
-def _dispatch_frame(frame: dict) -> None:
-    """Update the live store for each decoded channel, then trigger its N2K frame."""
-    for channel_name, decoded in frame.get("values", {}).items():
-        old = live_data.get(channel_name)
-        old_copy = dict(old) if old else None
-        update_live_data(channel_name, decoded.get("channel_id"), decoded.get("value"),
-                         decoded.get("display_text"), decoded.get("layout"))
-        mapping.process_channel(channel_name, old_copy)
+def main() -> int:
+    args = parse_args()
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)-5s %(message)s")
+    try:
+        return asyncio.run(run(args))
+    except KeyboardInterrupt:
+        return 0
 
 
 if __name__ == "__main__":

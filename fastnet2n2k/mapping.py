@@ -1,19 +1,18 @@
 """Map decoded Fastnet channels to NMEA2000 messages and send them on the CAN bus.
 
-Ported from fastnet2ip/handlers/nmea2000.py, re-targeted from tomer-w's UDP encoder
-to the finnboeger ``n2k`` library transmitting on a real SocketCAN interface via
-``n2k.Node.send_msg``.
+Uses the ``nmea2000`` library (tomer-w), which is canboat-based: messages are built
+by taking a blank PGN template from :mod:`nmea2000.pgns`, setting the fields we care
+about (by id, in SI units), and handing the resulting ``NMEA2000Message`` to an
+``N2KDevice`` that transmits it over SocketCAN and manages ISO address claiming.
 
-Conventions (per design decisions):
-- **Units** are converted to NMEA2000 SI: knots→m/s, degrees→radians, °C/°F→Kelvin,
-  NM→metres, mbar→Pascals. Depth is already metres.
-- **Sign** is taken directly from pyfastnet's ``value`` (pyfastnet applies the
-  layout-derived sign during decode).
-- **T/M reference** is taken from the pyfastnet ``layout`` field — the only place it
-  exists. If a bearing channel's layout doesn't map to a known reference the frame is
-  skipped and logged (never guessed).
-- **Staleness**: frames are sent only when a channel updates (event-driven), with a
-  minimum interval and a maximum re-broadcast age. When the source stops, output
+Conventions:
+- **Units** → NMEA2000 SI: knots→m/s, degrees→radians, °C/°F→Kelvin, NM→m, mbar→Pa.
+- **Sign** is taken directly from pyfastnet's decoded ``value``.
+- **T/M reference** is taken from the pyfastnet ``layout`` field (the only place it
+  exists) and mapped to the canboat lookup string. If a bearing channel's layout
+  can't be resolved the frame is skipped and logged — never guessed.
+- **Staleness**: a PGN is sent only when its channel updates (event-driven), with a
+  minimum interval and a maximum re-broadcast age; when the source stops, output
   stops and consumers time the PGN out themselves.
 """
 
@@ -22,121 +21,90 @@ import time
 from datetime import datetime, timezone
 from math import radians
 
-from n2k import types as n2k_types
-from n2k.message import Message
-from n2k.messages import (
-    Attitude,
-    BatteryStatus,
-    BoatSpeed,
-    CogSogRapid,
-    CrossTrackError,
-    DistanceLog,
-    Heading,
-    LatLonRapid,
-    Leeway,
-    RateOfTurn,
-    Rudder,
-    Temperature,
-    ActualPressure,
-    WaterDepth,
-    WindSpeed,
-    create_n2k_attitude_message,
-    create_n2k_battery_status_message,
-    create_n2k_boat_speed_message,
-    create_n2k_cog_sog_rapid_message,
-    create_n2k_cross_track_error_message,
-    create_n2k_distance_log_message,
-    create_n2k_heading_message,
-    create_n2k_lat_long_rapid_message,
-    create_n2k_leeway_message,
-    create_n2k_rate_of_turn_message,
-    create_n2k_rudder_message,
-    create_n2k_temperature_message,
-    create_n2k_actual_pressure_message,
-    create_n2k_water_depth_message,
-    create_n2k_wind_speed_message,
-)
+import nmea2000.pgns as pgns
 
 from .live_store import get_live_data, get_live_display, live_data
 
 logger = logging.getLogger("fastnet2n2k.mapping")
 
-# ── Tuning ────────────────────────────────────────────────────────────────────
-MIN_SEND_INTERVAL = 0.05   # s — never send the same channel faster than 20 Hz
-REBROADCAST_AGE   = 5.0    # s — re-send an unchanged value at most this often
+MIN_SEND_INTERVAL = 0.05
+REBROADCAST_AGE   = 5.0
 KN_MS             = 0.514444
 
 _channel_last_sent: dict = {}
-_sid = 0
-_node = None
+_device = None
 
 
-def set_node(node) -> None:
-    """Register the n2k.Node that frames are transmitted through."""
-    global _node
-    _node = node
+def set_device(device) -> None:
+    """Register the N2KDevice that frames are transmitted through."""
+    global _device
+    _device = device
 
 
-def _next_sid() -> int:
-    global _sid
-    _sid = (_sid + 1) % 253
-    return _sid
-
-
-def _c_to_k(c: float) -> float:
+def _c_to_k(c):
     return c + 273.15
 
 
-def _f_to_k(f: float) -> float:
+def _f_to_k(f):
     return (f - 32) * 5 / 9 + 273.15
 
 
-# ── Layout → reference (the only source of T/M) ───────────────────────────────
-_LAYOUT_HEADING_REF = {
-    "°M": n2k_types.N2kHeadingReference.magnetic,
-    "°T": n2k_types.N2kHeadingReference.true,
-}
+def _build(pgn, priority, **fields):
+    """Build an NMEA2000Message for ``pgn`` with the given field id → SI value pairs.
+
+    ``None`` values are written through as "data not available". Source is left 0 so
+    the N2KDevice substitutes its claimed address.
+    """
+    msg = getattr(pgns, f"decode_pgn_{pgn}")(0, 0)
+    msg.source = 0
+    msg.priority = priority
+    msg.timestamp = datetime.now(timezone.utc)
+    for f in msg.fields:
+        if f.id in fields:
+            f.raw_value = None
+            f.value = fields[f.id]
+    return msg
+
+
+# ── Layout → canboat reference string (the only source of T/M) ────────────────
+_LAYOUT_BEARING_REF = {"°M": "Magnetic", "°T": "True"}
 _LAYOUT_WIND_REF = {
-    "°M": n2k_types.N2kWindReference.Magnetic,
-    "°T": n2k_types.N2kWindReference.TrueNorth,
+    "°M": "Magnetic (ground referenced to Magnetic North)",
+    "°T": "True (ground referenced to North)",
 }
 
 
-def _heading_ref(name: str):
+def _bearing_ref(name):
     entry = live_data.get(name)
     if entry is None:
         return None
-    ref = _LAYOUT_HEADING_REF.get(entry["layout"])
+    ref = _LAYOUT_BEARING_REF.get(entry["layout"])
     if ref is None:
         logger.error("%s: unrecognised layout %r — skipping frame", name, entry["layout"])
     return ref
 
 
-# ── Triggers (each returns one n2k Message, or None) ──────────────────────────
+# ── Triggers: each returns one NMEA2000Message, or None ───────────────────────
 
 def _wind(angle_ch, speed_ch, reference):
     angle = get_live_data(angle_ch)
     speed = get_live_data(speed_ch)
     if angle is None and speed is None:
         return None
-    if angle is not None and angle < 0:   # N2K wind angle is 0..2π
+    if angle is not None and angle < 0:        # N2K wind angle is 0..2π
         angle += 360
-    return create_n2k_wind_speed_message(WindSpeed(
-        sid=_next_sid(),
-        wind_speed=speed * KN_MS if speed is not None else None,
-        wind_angle=radians(angle) if angle is not None else None,
-        wind_reference=reference,
-    ))
+    return _build(130306, 2,
+                  windSpeed=speed * KN_MS if speed is not None else None,
+                  windAngle=radians(angle) if angle is not None else None,
+                  reference=reference)
 
 
 def process_apparent_wind():
-    return _wind("Apparent Wind Angle", "Apparent Wind Speed (Knots)",
-                 n2k_types.N2kWindReference.Apparent)
+    return _wind("Apparent Wind Angle", "Apparent Wind Speed (Knots)", "Apparent")
 
 
 def process_true_wind():
-    return _wind("True Wind Angle", "True Wind Speed (Knots)",
-                 n2k_types.N2kWindReference.TrueBoat)
+    return _wind("True Wind Angle", "True Wind Speed (Knots)", "True (boat referenced)")
 
 
 def process_twd():
@@ -155,44 +123,40 @@ def process_heading():
     hdg = get_live_data("Heading")
     if hdg is None:
         return None
-    ref = _heading_ref("Heading")
+    ref = _bearing_ref("Heading")
     if ref is None:
         return None
-    return create_n2k_heading_message(Heading(
-        sid=_next_sid(), heading=radians(hdg), deviation=None, variation=None, ref=ref))
+    return _build(127250, 2, heading=radians(hdg), reference=ref,
+                  deviation=None, variation=None)
 
 
 def process_boatspeed():
     bs = get_live_data("Boatspeed (Knots)")
     if bs is None:
         return None
-    return create_n2k_boat_speed_message(BoatSpeed(
-        sid=_next_sid(), water_referenced=bs * KN_MS, ground_referenced=None,
-        swrt=n2k_types.N2kSpeedWaterReferenceType.PaddleWheel))
+    return _build(128259, 2, speedWaterReferenced=bs * KN_MS,
+                  speedGroundReferenced=None, speedDirection=None)
 
 
 def process_depth():
     dm = get_live_data("Depth (Meters)")
     if dm is None:
         return None
-    return create_n2k_water_depth_message(WaterDepth(
-        sid=_next_sid(), depth_below_transducer=dm, offset=None, max_range=None))
+    return _build(128267, 3, depth=dm, offset=None, range=None)
 
 
 def process_rudder():
     ra = get_live_data("Rudder Angle")
     if ra is None:
         return None
-    return create_n2k_rudder_message(Rudder(
-        instance=0, rudder_position=radians(ra), angle_order=None,
-        rudder_direction_order=n2k_types.N2kRudderDirectionOrder.NoDirectionOrder))
+    return _build(127245, 2, instance=0, position=radians(ra), angleOrder=None)
 
 
 def process_leeway():
     lw = get_live_data("Leeway")
     if lw is None:
         return None
-    return create_n2k_leeway_message(Leeway(sid=_next_sid(), leeway=radians(lw)))
+    return _build(128000, 4, leewayAngle=radians(lw))
 
 
 def process_cog_sog():
@@ -203,22 +167,19 @@ def process_cog_sog():
         return None
     sog_ms = sog * KN_MS
     if cog_true is not None:
-        ref, cog = n2k_types.N2kHeadingReference.true, radians(cog_true % 360)
-    elif cog_mag is not None:
-        ref, cog = n2k_types.N2kHeadingReference.magnetic, radians(cog_mag % 360)
-    else:
-        ref, cog = n2k_types.N2kHeadingReference.true, None
-    return create_n2k_cog_sog_rapid_message(CogSogRapid(
-        sid=_next_sid(), heading_reference=ref, cog=cog, sog=sog_ms))
+        return _build(129026, 2, cogReference="True",
+                      cog=radians(cog_true % 360), sog=sog_ms)
+    if cog_mag is not None:
+        return _build(129026, 2, cogReference="Magnetic",
+                      cog=radians(cog_mag % 360), sog=sog_ms)
+    return _build(129026, 2, cog=None, sog=sog_ms)
 
 
 def process_battery():
     v = get_live_data("Battery Volts")
     if v is None:
         return None
-    return create_n2k_battery_status_message(BatteryStatus(
-        sid=_next_sid(), battery_instance=0, battery_voltage=v,
-        battery_current=None, battery_temperature=None))
+    return _build(127508, 6, instance=0, voltage=v, current=None, temperature=None)
 
 
 def process_attitude():
@@ -226,20 +187,16 @@ def process_attitude():
     pitch = get_live_data("Fore/Aft Trim")
     if roll is None and pitch is None:
         return None
-    return create_n2k_attitude_message(Attitude(
-        sid=_next_sid(), yaw=None,
-        pitch=radians(pitch) if pitch is not None else None,
-        roll=radians(roll) if roll is not None else None))
+    return _build(127257, 3, yaw=None,
+                  pitch=radians(pitch) if pitch is not None else None,
+                  roll=radians(roll) if roll is not None else None)
 
 
 def process_pressure():
     bp = get_live_data("Barometric Pressure")   # mbar / hPa
     if bp is None:
         return None
-    return create_n2k_actual_pressure_message(ActualPressure(
-        sid=_next_sid(), pressure_instance=0,
-        pressure_source=n2k_types.N2kPressureSource.Atmospheric,
-        actual_pressure=bp * 100))
+    return _build(130314, 5, instance=0, source="Atmospheric", pressure=bp * 100)
 
 
 def _temperature(channel_c, channel_f, source):
@@ -251,19 +208,16 @@ def _temperature(channel_c, channel_f, source):
         if f is None:
             return None
         k = _f_to_k(f)
-    return create_n2k_temperature_message(Temperature(
-        sid=_next_sid(), temp_instance=0, temp_source=source,
-        actual_temperature=k, set_temperature=None))
+    return _build(130312, 5, instance=0, source=source,
+                  actualTemperature=k, setTemperature=None)
 
 
 def process_sea_temp():
-    return _temperature("Sea Temperature (°C)", "Sea Temperature (°F)",
-                        n2k_types.N2kTempSource.SeaTemperature)
+    return _temperature("Sea Temperature (°C)", "Sea Temperature (°F)", "Sea Temperature")
 
 
 def process_air_temp():
-    return _temperature("Air Temperature (°C)", "Air Temperature (°F)",
-                        n2k_types.N2kTempSource.OutsideTemperature)
+    return _temperature("Air Temperature (°C)", "Air Temperature (°F)", "Outside Temperature")
 
 
 def process_distance_log():
@@ -272,54 +226,37 @@ def process_distance_log():
     if stored is None and trip is None:
         return None
     now = datetime.now(timezone.utc)
-    secs = now.hour * 3600 + now.minute * 60 + now.second + now.microsecond / 1e6
-    days = (now.date() - datetime(1970, 1, 1, tzinfo=timezone.utc).date()).days
-    return create_n2k_distance_log_message(DistanceLog(
-        days_since_1970=days, seconds_since_midnight=secs,
-        log=int(stored * 1852) if stored is not None else None,
-        trip_log=int(trip * 1852) if trip is not None else None))
+    return _build(128275, 6, date=now.date(), time=now.time(),
+                  log=int(stored * 1852) if stored is not None else None,
+                  tripLog=int(trip * 1852) if trip is not None else None)
 
 
 def process_xte():
     xte = get_live_data("Cross Track Error")
     if xte is None:
         return None
-    return create_n2k_cross_track_error_message(CrossTrackError(
-        sid=_next_sid(), xte_mode=n2k_types.N2kXTEMode.Autonomous,
-        navigation_terminated=False, xte=xte * 1852))
+    return _build(129283, 3, xteMode="Autonomous", navigationTerminated="No",
+                  xte=xte * 1852)
 
 
 def process_rate_of_turn():
     yr = get_live_data("Yaw rate")
     if yr is None:
         return None
-    return create_n2k_rate_of_turn_message(RateOfTurn(
-        sid=_next_sid(), rate_of_turn=radians(yr)))
-
-
-# PGN 129291 Set & Drift, Rapid Update — no n2k builder, so build it by hand.
-# Layout (canboat): SID(1) | SetReference 2b + reserved 6b | Set 16b@0.0001rad |
-# Drift 16b@0.01 m/s | reserved 16b  = 8 bytes (single frame).
-PGN_SET_DRIFT = 129291
+    return _build(127251, 2, rate=radians(yr))
 
 
 def process_set_drift():
-    set_deg = get_live_data("Tidal Set")     # degrees (direction the tide flows toward)
+    set_deg = get_live_data("Tidal Set")     # degrees
     drift   = get_live_data("Tidal Drift")   # knots
     if set_deg is None and drift is None:
         return None
-    ref = _heading_ref("Tidal Set")          # T/M from the Tidal Set layout
+    ref = _bearing_ref("Tidal Set")
     if ref is None:
         return None
-    msg = Message()
-    msg.pgn = PGN_SET_DRIFT
-    msg.priority = 3
-    msg.add_byte_uint(_next_sid())
-    msg.add_byte_uint((int(ref) & 0x03) | 0xFC)   # set reference + reserved bits
-    msg.add_2_byte_udouble(radians(set_deg % 360) if set_deg is not None else None, 0.0001)
-    msg.add_2_byte_udouble(max(0.0, drift) * KN_MS if drift is not None else None, 0.01)
-    msg.add_2_byte_uint(0xFFFF)               # reserved
-    return msg
+    return _build(129291, 3, setReference=ref,
+                  set=radians(set_deg % 360) if set_deg is not None else None,
+                  drift=max(0.0, drift) * KN_MS if drift is not None else None)
 
 
 def process_position():
@@ -342,12 +279,10 @@ def process_position():
         lat = -lat
     if lon_dir == 'W':
         lon = -lon
-    return create_n2k_lat_long_rapid_message(LatLonRapid(latitude=lat, longitude=lon))
+    return _build(129025, 2, latitude=lat, longitude=lon)
 
 
 # ── Channel → trigger map ─────────────────────────────────────────────────────
-# A callable builds a frame; a string documents why a channel has no own trigger
-# (its data is carried in another channel's frame). Deferred PGNs are noted too.
 _CHANNEL_MAP = {
     "Heading":                      process_heading,
     "Rudder Angle":                 process_rudder,
@@ -380,12 +315,16 @@ _CHANNEL_MAP = {
     "Cross Track Error":            process_xte,
     "Tidal Set":                    process_set_drift,
     "Tidal Drift":                  "covered by 'Tidal Set' (same frame)",
-    # ── Deferred (no n2k builder yet; need manual Message.add_*) ──
+    # Deferred: B&G proprietary raw PGNs (65280-65282) — manufacturer-specific.
     "Boatspeed (Raw)":             "TODO: proprietary PGN 65282 (deferred)",
     "Heading (Raw)":               "TODO: proprietary PGN 65281 (deferred)",
     "Apparent Wind Speed (Raw)":   "TODO: proprietary PGN 65280 (deferred)",
     "Apparent Wind Angle (Raw)":   "TODO: proprietary PGN 65280 (deferred)",
 }
+
+# PGNs this node transmits — advertised to the bus by the N2KDevice.
+TX_PGNS = [127245, 127250, 127251, 127257, 127508, 128000, 128259, 128267,
+           128275, 129025, 129026, 129283, 129291, 130306, 130312, 130314]
 
 
 def trigger_n2k_frame(channel_name):
@@ -399,7 +338,7 @@ def trigger_n2k_frame(channel_name):
     return None
 
 
-def process_channel(channel_name, old_entry):
+async def process_channel(channel_name, old_entry):
     """Apply the throttle policy, then build and transmit the channel's frame."""
     now = time.monotonic()
     current = live_data.get(channel_name)
@@ -416,6 +355,7 @@ def process_channel(channel_name, old_entry):
     msg = trigger_n2k_frame(channel_name)
     if msg is None:
         return
+    if _device is None or not _device.ready:
+        return   # address not claimed yet — retry on the next update
     _channel_last_sent[channel_name] = now
-    if _node is not None:
-        _node.send_msg(msg)
+    await _device.send(msg)

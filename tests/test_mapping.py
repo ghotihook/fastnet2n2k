@@ -1,35 +1,30 @@
-"""Unit tests for the Fastnet → NMEA2000 mapping.
+"""Unit tests for the Fastnet → NMEA2000 mapping (tomer-w/nmea2000 backend).
 
-Feeds pyfastnet's bundled capture files through the decoder into the live store,
-then exercises the mapping triggers and round-trips the resulting NMEA2000 messages
-with the n2k parsers to confirm PGN, units, T/M reference and sign.
+Feeds pyfastnet's bundled captures through the decoder into the live store, then
+exercises the mapping triggers. Each trigger returns an ``NMEA2000Message``; we check
+the field values (SI units), the T/M reference strings and the sign, and confirm every
+produced message actually encodes through the canboat codec.
 """
 
+import asyncio
 import math
 import os
 
 import pytest
 from fastnet_decoder import FrameBuffer
-from n2k import types as t
-from n2k.messages import (
-    parse_n2k_attitude,
-    parse_n2k_boat_speed,
-    parse_n2k_cog_sog_rapid,
-    parse_n2k_heading,
-    parse_n2k_temperature,
-    parse_n2k_water_depth,
-    parse_n2k_wind_speed,
-)
+from nmea2000.encoder import NMEA2000Encoder
+from nmea2000.input_formats import N2KFormat
+import nmea2000.encoder_formats  # noqa: F401  (registers formats)
 
 from fastnet2n2k import mapping
 from fastnet2n2k.live_store import live_data, update_live_data
 
 CAPTURES = "/Users/alex060/Prod/pyfastnet/temp"
 KN_MS = 0.514444
+_ENC = NMEA2000Encoder(N2KFormat.CAN_FRAME_ASCII)
 
 
 def load_capture(name):
-    """Reset the live store and replay a capture file into it."""
     live_data.clear()
     mapping._channel_last_sent.clear()
     with open(os.path.join(CAPTURES, name)) as f:
@@ -44,6 +39,15 @@ def load_capture(name):
                                  d.get("display_text"), d.get("layout"))
 
 
+def fval(msg, fid):
+    return next(f.value for f in msg.fields if f.id == fid)
+
+
+def encodes(msg):
+    """The message round-trips through the canboat encoder without error."""
+    return bool(_ENC.encode(msg))
+
+
 @pytest.fixture(autouse=True)
 def _example1():
     load_capture("example1_fastnet_data.txt")
@@ -51,107 +55,104 @@ def _example1():
 
 def test_heading_magnetic():
     msg = mapping.process_heading()
-    assert msg.pgn == 127250
-    h = parse_n2k_heading(msg)
-    assert h.ref == t.N2kHeadingReference.magnetic          # from "°M" layout
-    assert math.degrees(h.heading) == pytest.approx(319, abs=0.05)
+    assert msg.PGN == 127250
+    assert fval(msg, "reference") == "Magnetic"            # from "°M" layout
+    assert math.degrees(fval(msg, "heading")) == pytest.approx(319, abs=0.05)
+    assert encodes(msg)
 
 
 def test_apparent_wind_units_and_reference():
     msg = mapping.process_apparent_wind()
-    assert msg.pgn == 130306
-    w = parse_n2k_wind_speed(msg)
-    assert w.wind_reference == t.N2kWindReference.Apparent
-    assert math.degrees(w.wind_angle) == pytest.approx(85, abs=0.05)
-    assert w.wind_speed == pytest.approx(16.3 * KN_MS, abs=0.01)   # knots → m/s
+    assert msg.PGN == 130306
+    assert fval(msg, "reference") == "Apparent"
+    assert math.degrees(fval(msg, "windAngle")) == pytest.approx(85, abs=0.05)
+    assert fval(msg, "windSpeed") == pytest.approx(16.3 * KN_MS, abs=0.01)
+    assert encodes(msg)
 
 
 def test_true_wind_direction_reference_from_layout():
     msg = mapping.process_twd()
-    assert msg.pgn == 130306
-    w = parse_n2k_wind_speed(msg)
-    assert w.wind_reference == t.N2kWindReference.Magnetic          # "°M"
-    assert math.degrees(w.wind_angle) == pytest.approx(46, abs=0.05)
+    assert fval(msg, "reference") == "Magnetic (ground referenced to Magnetic North)"
+    assert math.degrees(fval(msg, "windAngle")) == pytest.approx(46, abs=0.05)
+    assert encodes(msg)
 
 
 def test_boatspeed_knots_to_ms():
-    w = parse_n2k_boat_speed(mapping.process_boatspeed())
-    assert w.water_referenced == pytest.approx(0.87 * KN_MS, abs=0.01)
+    msg = mapping.process_boatspeed()
+    assert fval(msg, "speedWaterReferenced") == pytest.approx(0.87 * KN_MS, abs=0.01)
+    assert encodes(msg)
 
 
 def test_depth_metres_passthrough():
-    d = parse_n2k_water_depth(mapping.process_depth())
-    assert d.depth_below_transducer == pytest.approx(15.2, abs=0.01)
+    msg = mapping.process_depth()
+    assert fval(msg, "depth") == pytest.approx(15.2, abs=0.01)
+    assert encodes(msg)
 
 
 def test_cog_sog_prefers_true():
     msg = mapping.process_cog_sog()
-    c = parse_n2k_cog_sog_rapid(msg)
-    assert c.heading_reference == t.N2kHeadingReference.true        # COG (True) present
-    assert math.degrees(c.cog) == pytest.approx(336, abs=0.05)
-    assert c.sog == pytest.approx(1.7 * KN_MS, abs=0.01)
-
-
-def test_set_drift_manual_pgn():
-    msg = mapping.process_set_drift()
-    assert msg.pgn == 129291
-    assert len(msg.data) == 8
-    # Decode the hand-built frame: SID | ref(2b) | set(0.0001rad) | drift(0.01 m/s) | rsv
-    ref = msg.data[1] & 0x03
-    set_raw   = int.from_bytes(msg.data[2:4], "little")
-    drift_raw = int.from_bytes(msg.data[4:6], "little")
-    assert ref == int(t.N2kHeadingReference.magnetic)            # "°M" layout
-    assert math.degrees(set_raw * 0.0001) == pytest.approx(277, abs=0.05)
-    assert drift_raw * 0.01 == pytest.approx(0.78 * KN_MS, abs=0.01)
+    assert fval(msg, "cogReference") == "True"
+    assert math.degrees(fval(msg, "cog")) == pytest.approx(336, abs=0.05)
+    assert fval(msg, "sog") == pytest.approx(1.7 * KN_MS, abs=0.01)
+    assert encodes(msg)
 
 
 def test_sea_temp_c_to_kelvin():
-    temp = parse_n2k_temperature(mapping.process_sea_temp())
-    assert temp.temp_source == t.N2kTempSource.SeaTemperature
-    assert temp.actual_temperature == pytest.approx(24 + 273.15, abs=0.05)
+    msg = mapping.process_sea_temp()
+    assert fval(msg, "source") == "Sea Temperature"
+    assert fval(msg, "actualTemperature") == pytest.approx(24 + 273.15, abs=0.05)
+    assert encodes(msg)
+
+
+def test_set_drift_native_pgn():
+    msg = mapping.process_set_drift()
+    assert msg.PGN == 129291
+    assert fval(msg, "setReference") == "Magnetic"
+    assert math.degrees(fval(msg, "set")) == pytest.approx(277, abs=0.05)
+    assert fval(msg, "drift") == pytest.approx(0.78 * KN_MS, abs=0.01)
+    assert encodes(msg)
 
 
 def test_unavailable_channel_sends_nothing():
-    # Heel/Trim are " OFF" (value None) in this capture → no attitude frame.
-    assert mapping.process_attitude() is None
+    assert mapping.process_attitude() is None    # heel/trim are " OFF" in example1
     assert mapping.process_pressure() is None
 
 
 def test_heel_sign_passthrough():
-    # pyfastnet already applies the sign; mapping must pass it through unchanged.
     load_capture("heel-port.txt")
-    port = parse_n2k_attitude(mapping.process_attitude())
+    port = mapping.process_attitude()
     load_capture("heel-stb.txt")
-    stb = parse_n2k_attitude(mapping.process_attitude())
-    assert port.roll < 0 < stb.roll
-    assert math.degrees(port.roll) == pytest.approx(-19.6, abs=0.1)
-    assert math.degrees(stb.roll) == pytest.approx(33.7, abs=0.1)
+    stb = mapping.process_attitude()
+    assert fval(port, "roll") < 0 < fval(stb, "roll")
+    assert math.degrees(fval(port, "roll")) == pytest.approx(-19.6, abs=0.1)
+    assert math.degrees(fval(stb, "roll")) == pytest.approx(33.7, abs=0.1)
 
 
-class _StubNode:
+class _StubDevice:
+    ready = True
+
     def __init__(self):
         self.sent = []
 
-    def send_msg(self, msg):
+    async def send(self, msg):
         self.sent.append(msg)
-        return True
 
 
 def test_throttle_min_interval():
-    node = _StubNode()
-    mapping.set_node(node)
+    dev = _StubDevice()
+    mapping.set_device(dev)
     mapping._channel_last_sent.clear()
     update_live_data("Depth (Meters)", "0xC1", 15.2, "15.2", None)
-    mapping.process_channel("Depth (Meters)", None)          # first → sends
-    mapping.process_channel("Depth (Meters)", None)          # <0.05s later → throttled
-    assert len(node.sent) == 1
-    assert node.sent[0].pgn == 128267
+    asyncio.run(mapping.process_channel("Depth (Meters)", None))   # first → sends
+    asyncio.run(mapping.process_channel("Depth (Meters)", None))   # <0.05s → throttled
+    assert len(dev.sent) == 1
+    assert dev.sent[0].PGN == 128267
 
 
 def test_no_send_when_trigger_returns_none():
-    node = _StubNode()
-    mapping.set_node(node)
+    dev = _StubDevice()
+    mapping.set_device(dev)
     mapping._channel_last_sent.clear()
     update_live_data("Heel Angle", "0x34", None, " OFF", None)
-    mapping.process_channel("Heel Angle", None)
-    assert node.sent == []
+    asyncio.run(mapping.process_channel("Heel Angle", None))
+    assert dev.sent == []
