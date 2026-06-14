@@ -19,20 +19,25 @@ Each Fastnet channel is mapped to the matching PGN and emitted **only when the
 channel updates** (with a 0.05 s minimum interval and a 5 s maximum re-broadcast),
 so when the instruments go quiet the output stops and consumers time the data out.
 
-| Data | PGN | Notes |
-|---|---|---|
-| Heading | 127250 | T/M reference taken from the Fastnet display layout (`°M`/`°T`) |
-| Apparent / True wind, TWD | 130306 | knots→m/s, deg→rad; reference per layout |
-| Boat speed | 128259 | knots→m/s |
-| Depth | 128267 | metres |
-| COG/SOG | 129026 | prefers True COG, falls back to Magnetic |
-| Attitude (heel/trim) | 127257 | signed value passed through unchanged |
-| Rudder, Leeway, Rate of turn | 127245 / 128000 / 127251 | |
-| Distance log, XTE | 128275 / 129283 | NM→m |
-| Position | 129025 | |
-| Sea / air temperature | 130312 | °C/°F→Kelvin |
-| Barometric pressure | 130314 | mbar→Pa |
-| Tidal set & drift | 129291 | set deg→rad, drift kn→m/s; reference per layout |
+| Data | PGN | Priority | Notes |
+|---|---|---|---|
+| Heading | 127250 | 2 | T/M reference taken from the Fastnet display layout (`°M`/`°T`) |
+| Apparent / True wind, TWD | 130306 | 2 | knots→m/s, deg→rad; reference per layout |
+| Boat speed | 128259 | 2 | knots→m/s |
+| Depth | 128267 | 3 | metres |
+| COG/SOG | 129026 | 2 | prefers True COG, falls back to Magnetic |
+| Attitude (heel/trim) | 127257 | 3 | signed value passed through unchanged |
+| Rudder, Leeway, Rate of turn | 127245 / 128000 / 127251 | 2 / 4 / 2 | |
+| Distance log, XTE | 128275 / 129283 | 6 / 3 | NM→m |
+| Position | 129025 | 2 | |
+| Sea / air temperature | 130312 | 5 | °C/°F→Kelvin |
+| Barometric pressure | 130314 | 5 | mbar→Pa |
+| Tidal set & drift | 129291 | 3 | set deg→rad, drift kn→m/s; reference per layout |
+
+The **Priority** column lists each PGN's NMEA2000 standard CAN priority (0 = highest,
+7 = lowest). These are the values used **by default** — when `--n2k-priority` is *not*
+given, every frame keeps the per-PGN priority shown above. Passing `--n2k-priority N`
+overrides the whole column, forcing all frames to a single priority `N`.
 
 **Units** are converted to NMEA2000 SI. **Sign** comes straight from pyfastnet's
 decoded value. **True/Magnetic** is read from the pyfastnet `layout` field (the only
@@ -90,6 +95,7 @@ Options:
 | `--serial DEV` / `--file PATH` | — | input source (one is required) |
 | `--channel` | `can0` | SocketCAN interface |
 | `--n2k-src` | `22` | preferred N2K source address (0–251) |
+| `--n2k-priority` | per-PGN standard | override CAN priority (0–7, 0=highest) for **all** transmitted frames; **if omitted, each PGN keeps its standard priority** (see the PGN table above) |
 | `--unique` | from hostname | device NAME unique number |
 | `--live-data` | off | print the live channel table to the console once per second |
 | `--log-level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |

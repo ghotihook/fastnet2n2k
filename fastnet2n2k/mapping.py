@@ -33,6 +33,7 @@ KN_MS             = 0.514444
 
 _channel_last_sent: dict = {}
 _device = None
+_priority_override = None
 _last_send_error_log = 0.0
 _SEND_ERROR_LOG_INTERVAL = 5.0
 
@@ -41,6 +42,13 @@ def set_device(device) -> None:
     """Register the N2KDevice that frames are transmitted through."""
     global _device
     _device = device
+
+
+def set_priority_override(priority) -> None:
+    """Force every transmitted frame to ``priority`` (0–7), ignoring the per-PGN
+    standard priorities. ``None`` restores the standard per-PGN behaviour."""
+    global _priority_override
+    _priority_override = priority
 
 
 def _c_to_k(c):
@@ -59,7 +67,7 @@ def _build(pgn, priority, **fields):
     """
     msg = getattr(pgns, f"decode_pgn_{pgn}")(0, 0)
     msg.source = 0
-    msg.priority = priority
+    msg.priority = _priority_override if _priority_override is not None else priority
     msg.timestamp = datetime.now(timezone.utc)
     for f in msg.fields:
         if f.id in fields:

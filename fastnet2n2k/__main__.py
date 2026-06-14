@@ -44,6 +44,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--channel", default="can0", help="SocketCAN interface (default: can0)")
     p.add_argument("--n2k-src", type=lambda x: int(x, 0), default=22,
                    help="Preferred N2K source address 0–251 (default: 22)")
+    p.add_argument("--n2k-priority", type=lambda x: int(x, 0), default=None,
+                   help="Override the CAN priority (0–7, 0=highest) for ALL transmitted "
+                        "frames. Default: each PGN uses its NMEA2000 standard priority.")
     p.add_argument("--unique", type=int, default=fnv_unique(),
                    help="Device NAME unique number (default: derived from hostname)")
     p.add_argument("--live-data", action="store_true",
@@ -51,7 +54,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-level", default="INFO",
                    choices=("DEBUG", "INFO", "WARNING", "ERROR"),
                    help="Logging verbosity (default: INFO)")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.n2k_priority is not None and not 0 <= args.n2k_priority <= 7:
+        p.error("--n2k-priority must be 0–7")
+    return args
 
 
 def make_device(args: argparse.Namespace) -> N2KDevice:
@@ -96,6 +102,9 @@ async def run(args: argparse.Namespace) -> int:
     await device.start()
 
     mapping.set_device(device)
+    if args.n2k_priority is not None:
+        mapping.set_priority_override(args.n2k_priority)
+        logger.info("Overriding priority for all frames: %d", args.n2k_priority)
     logger.info("Transmitting on %s (preferred src=%d); reading Fastnet from %s",
                 args.channel, args.n2k_src, args.serial or args.file)
     try:
