@@ -5,8 +5,6 @@ Ported from fastnet2ip/core/input.py.
 """
 
 import logging
-import select
-import time
 
 import serial
 
@@ -51,15 +49,25 @@ def initialize_input_source(serial_port=None, file_path=None):
         raise SystemExit(1)
 
 
-def read_input_source(input_source, is_file):
-    """Return the next chunk of bytes, or ``None`` (file exhausted / no data yet)."""
-    if is_file:
+def attach_serial_reader(loop, ser, queue):
+    """Register ``ser``'s fd with the asyncio event loop so it wakes only when bytes
+    are available, pushing each chunk onto ``queue``. Returns the fd so the caller can
+    ``loop.remove_reader(fd)`` on shutdown.
+
+    Replaces the old thread-per-read model: the port is opened non-blocking
+    (``timeout=0``), so ``read`` in the callback returns immediately with whatever is
+    buffered, and there is no ThreadPoolExecutor handoff per chunk.
+    """
+    fd = ser.fileno()
+
+    def _on_readable():
         try:
-            time.sleep(FILE_READ_DELAY)
-            return next(input_source)
-        except StopIteration:
-            return None
-    rlist, _, _ = select.select([input_source], [], [], 1)
-    if input_source in rlist:
-        return input_source.read(READ_SIZE)
-    return None
+            chunk = ser.read(READ_SIZE)
+        except (OSError, serial.SerialException) as exc:
+            logger.error("Serial read error: %s", exc)
+            return
+        if chunk:
+            queue.put_nowait(chunk)
+
+    loop.add_reader(fd, _on_readable)
+    return fd
