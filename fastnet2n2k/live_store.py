@@ -2,12 +2,14 @@
 
 Single-threaded: written and read from the main decode loop only. Each entry keeps
 the decoded ``value``, the ``display_text`` and ``layout`` from pyfastnet (the layout
-carries the T/M reference), and a ``timestamp`` so freshness can be reasoned about.
+carries the T/M reference), and a monotonic ``timestamp`` so freshness (age) can be
+reasoned about. Monotonic, not wall-clock: this is written on every channel update and
+only ever read as an elapsed delta, so it must be cheap and immune to clock steps.
 
 Ported from fastnet2ip/core/data_store.py.
 """
 
-from datetime import datetime, timezone
+import time
 
 live_data: dict = {}
 
@@ -18,7 +20,7 @@ def update_live_data(channel_name, channel_id, value, display_text, layout):
         "value":        value,
         "display_text": display_text,
         "layout":       layout,
-        "timestamp":    datetime.now(timezone.utc),
+        "timestamp":    time.monotonic(),
     }
 
 

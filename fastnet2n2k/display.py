@@ -5,20 +5,20 @@ currently in the live store with its value, display text, layout and age, so you
 eyeball what the decoder is producing while the bridge runs.
 """
 
-from datetime import datetime, timezone
+import time
 
 from .live_store import live_data
 
 
 def print_live_data(fb):
     print("\033c", end="")   # clear screen
-    now = datetime.now(timezone.utc)
+    now = time.monotonic()
     hdr = f"{'Channel':<35} {'ID':<10} {'Value':<20} {'Display':<20} {'Layout':<12} {'Age(s)':<10}"
     print(hdr)
     print("-" * len(hdr))
     for name, data in sorted(live_data.items()):
         ts = data.get("timestamp")
-        age = f"{(now - ts).total_seconds():.1f}" if ts else ""
+        age = f"{now - ts:.1f}" if ts is not None else ""
         print(
             f"{str(name):<35} {str(data.get('channel_id', '')):<10} "
             f"{str(data.get('value')):<20} "

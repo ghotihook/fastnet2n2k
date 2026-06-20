@@ -20,7 +20,7 @@ from nmea2000.device import N2KDevice
 from . import __version__, mapping
 from .display import print_live_data
 from .input_source import FILE_READ_DELAY, attach_serial_reader, initialize_input_source
-from .live_store import live_data, update_live_data
+from .live_store import update_live_data
 
 logger = logging.getLogger("fastnet2n2k")
 
@@ -92,11 +92,9 @@ def make_device(args: argparse.Namespace) -> N2KDevice:
 
 async def _dispatch_frame(frame: dict) -> None:
     for channel_name, decoded in frame.get("values", {}).items():
-        old = live_data.get(channel_name)
-        old_copy = dict(old) if old else None
         update_live_data(channel_name, decoded.get("channel_id"), decoded.get("value"),
                          decoded.get("display_text"), decoded.get("layout"))
-        await mapping.process_channel(channel_name, old_copy)
+        await mapping.process_channel(channel_name)
 
 
 async def _print_live_loop(fb) -> None:

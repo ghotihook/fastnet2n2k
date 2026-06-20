@@ -143,8 +143,8 @@ def test_throttle_min_interval():
     mapping.set_device(dev)
     mapping._channel_last_sent.clear()
     update_live_data("Depth (Meters)", "0xC1", 15.2, "15.2", None)
-    asyncio.run(mapping.process_channel("Depth (Meters)", None))   # first → sends
-    asyncio.run(mapping.process_channel("Depth (Meters)", None))   # <0.05s → throttled
+    asyncio.run(mapping.process_channel("Depth (Meters)"))   # first → sends
+    asyncio.run(mapping.process_channel("Depth (Meters)"))   # <0.05s → throttled
     assert len(dev.sent) == 1
     assert dev.sent[0].PGN == 128267
 
@@ -154,5 +154,5 @@ def test_no_send_when_trigger_returns_none():
     mapping.set_device(dev)
     mapping._channel_last_sent.clear()
     update_live_data("Heel Angle", "0x34", None, " OFF", None)
-    asyncio.run(mapping.process_channel("Heel Angle", None))
+    asyncio.run(mapping.process_channel("Heel Angle"))
     assert dev.sent == []

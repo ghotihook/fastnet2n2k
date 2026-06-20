@@ -348,18 +348,28 @@ def trigger_n2k_frame(channel_name):
     return None
 
 
-async def process_channel(channel_name, old_entry):
-    """Apply the throttle policy, then build and transmit the channel's frame."""
+async def process_channel(channel_name):
+    """Throttle, then build and transmit the channel's frame.
+
+    Channels with no trigger (sentinel-string or unknown entries) are skipped. A frame
+    is sent when the value changed since the last send — subject to MIN_SEND_INTERVAL —
+    or once REBROADCAST_AGE has elapsed, so a steady value is still refreshed and
+    consumers don't time it out. ``_channel_last_sent`` holds ``(monotonic_time, key)``
+    per channel, so no prior value needs to be passed in.
+    """
+    if not callable(_CHANNEL_MAP.get(channel_name)):
+        return
+
     now = time.monotonic()
     current = live_data.get(channel_name)
-    new_key = (current["value"], current["display_text"]) if current else (None, None)
-    old_key = (old_entry["value"], old_entry["display_text"]) if old_entry else (None, None)
+    key = (current["value"], current["display_text"]) if current else (None, None)
 
-    last_sent = _channel_last_sent.get(channel_name)
-    if last_sent is not None:
-        if (now - last_sent) < MIN_SEND_INTERVAL:
+    last = _channel_last_sent.get(channel_name)
+    if last is not None:
+        last_time, last_key = last
+        if now - last_time < MIN_SEND_INTERVAL:
             return
-        if new_key == old_key and (now - last_sent) < REBROADCAST_AGE:
+        if key == last_key and now - last_time < REBROADCAST_AGE:
             return
 
     msg = trigger_n2k_frame(channel_name)
@@ -367,7 +377,7 @@ async def process_channel(channel_name, old_entry):
         return
     if _device is None or not _device.ready:
         return   # not connected / address not claimed — retry on the next update
-    _channel_last_sent[channel_name] = now
+    _channel_last_sent[channel_name] = (now, key)
     try:
         await _device.send(msg)
     except Exception as exc:   # noqa: BLE001 — bus-off / interface drop / reconnect
