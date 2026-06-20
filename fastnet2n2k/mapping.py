@@ -11,8 +11,9 @@ Conventions:
 - **T/M reference** is taken from the pyfastnet ``layout`` field (the only place it
   exists) and mapped to the canboat lookup string. If a bearing channel's layout
   can't be resolved the frame is skipped and logged — never guessed.
-- **Staleness**: a PGN is sent only when its channel updates (event-driven), with a
-  minimum interval and a maximum re-broadcast age; when the source stops, output
+- **Cadence**: a PGN is sent on every channel update (event-driven) — a repeated
+  value is still live data worth putting on the bus — debounced only by
+  MIN_SEND_INTERVAL, which caps any one channel's rate. When the source stops, output
   stops and consumers time the PGN out themselves.
 """
 
@@ -27,8 +28,7 @@ from .live_store import get_live_data, get_live_display, live_data
 
 logger = logging.getLogger("fastnet2n2k.mapping")
 
-MIN_SEND_INTERVAL = 0.05
-REBROADCAST_AGE   = 5.0
+MIN_SEND_INTERVAL = 0.05    # per-channel rate cap (~20 Hz); debounce only
 KN_MS             = 0.514444
 
 _channel_last_sent: dict = {}
@@ -349,35 +349,28 @@ def trigger_n2k_frame(channel_name):
 
 
 async def process_channel(channel_name):
-    """Throttle, then build and transmit the channel's frame.
+    """Build and transmit the channel's frame on every update, debounced only.
 
-    Channels with no trigger (sentinel-string or unknown entries) are skipped. A frame
-    is sent when the value changed since the last send — subject to MIN_SEND_INTERVAL —
-    or once REBROADCAST_AGE has elapsed, so a steady value is still refreshed and
-    consumers don't time it out. ``_channel_last_sent`` holds ``(monotonic_time, key)``
-    per channel, so no prior value needs to be passed in.
+    Channels with no trigger (sentinel-string or unknown entries) are skipped. Every
+    update is sent — a repeated value is still live data worth putting on the bus —
+    subject to MIN_SEND_INTERVAL, which caps any one channel's rate (~20 Hz) so a
+    fast-updating channel can't flood the bus or CPU. ``_channel_last_sent`` holds the
+    monotonic time of each channel's last send.
     """
     if not callable(_CHANNEL_MAP.get(channel_name)):
         return
 
     now = time.monotonic()
-    current = live_data.get(channel_name)
-    key = (current["value"], current["display_text"]) if current else (None, None)
-
-    last = _channel_last_sent.get(channel_name)
-    if last is not None:
-        last_time, last_key = last
-        if now - last_time < MIN_SEND_INTERVAL:
-            return
-        if key == last_key and now - last_time < REBROADCAST_AGE:
-            return
+    last_time = _channel_last_sent.get(channel_name)
+    if last_time is not None and now - last_time < MIN_SEND_INTERVAL:
+        return
 
     msg = trigger_n2k_frame(channel_name)
     if msg is None:
         return
     if _device is None or not _device.ready:
         return   # not connected / address not claimed — retry on the next update
-    _channel_last_sent[channel_name] = (now, key)
+    _channel_last_sent[channel_name] = now
     try:
         await _device.send(msg)
     except Exception as exc:   # noqa: BLE001 — bus-off / interface drop / reconnect
