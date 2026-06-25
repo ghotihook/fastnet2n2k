@@ -54,3 +54,31 @@ layout (header, packing, priority) in one place, expose `build_*` handlers and a
 single explicit `register()` call (invoked from `__main__`, not as an import side
 effect), so `mapping.py` stays declarative. Remember to add the PGNs back to
 `TX_PGNS`.
+
+## Deferred: output rate / cadence
+
+Works, but the bus rate is higher than this setup needs. Today every Fastnet
+update is transmitted, debounced only by `MIN_SEND_INTERVAL = 0.05 s`
+(20 Hz/channel) with no dedupe (commit `6078efc`). Most channels are input-limited
+at ~3.5–9 Hz (~70 frames/s total) while the only consumer that matters
+(flightrecorder_n2k) buckets at **1 Hz with no carry-forward**, so it just needs
+~1 message/channel/second.
+
+Cheap, safe wins when revisited:
+- **Temperature double-fire.** `°C` and `°F` are the same reading in two units and
+  the instruments emit both, so PGN 130312 goes out twice. Make the `°F` channels
+  sentinels (`"duplicate of … (°C)"`) like Depth already does for feet/fathoms.
+  Halves 130312. (`process_sea_temp`/`process_air_temp` already prefer °C.)
+- **Lower the cap.** `MIN_SEND_INTERVAL` 0.05 → ~0.25 s (4 Hz). That's a 4× margin
+  over the 1 Hz sink, keeps every bucket filled (no gaps), and thins the bus with
+  one number. **Prefer the cap to dedupe** — dedupe (send-on-change) would punch
+  NULL holes in the no-carry-forward sink for steady values (depth at anchor, temp).
+- **Distance Log (128275)** looks like ~19 Hz but is fast-packet (3 CAN frames per
+  message ≈ 6.4 msg/s, same as Depth). Not a bug; drops out of the global cap.
+
+## Strategic: unify via Signal K
+
+Longer term, replace this bespoke Fastnet→NMEA 2000 mapping with a **Signal K**-based
+path so the whole boat data pipeline is unified (Signal K owns the N2K output, dedupe,
+and cadence). When that lands, this custom `mapping.py` / cadence logic — and the
+rate work above — goes away rather than being polished here.
