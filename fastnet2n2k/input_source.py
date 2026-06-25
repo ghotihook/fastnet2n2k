@@ -14,9 +14,10 @@ STOP_BITS       = serial.STOPBITS_TWO
 PARITY          = serial.PARITY_ODD
 READ_SIZE       = 256
 
-# Pace --file replay to roughly emulate the serial line: at ~38400 baud (~3840 B/s
-# for a 10-bit byte) a READ_SIZE chunk takes ~0.067 s. Approximate is close enough.
-FILE_READ_DELAY = READ_SIZE / 3840   # ≈ 0.067 s per 256-byte chunk (~38400 baud)
+# Pace --file replay to roughly the real Fastnet line speed (BAUDRATE), so a replay
+# runs at about the same rate as live serial. At ~10 bits/byte that's BAUDRATE/10 B/s,
+# and a READ_SIZE chunk takes that long. Approximate is close enough.
+FILE_READ_DELAY = READ_SIZE / (BAUDRATE / 10)   # ≈ 0.089 s per 256-byte chunk (~28800 baud)
 
 logger = logging.getLogger("fastnet2n2k.input")
 
