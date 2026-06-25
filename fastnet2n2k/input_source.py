@@ -13,7 +13,7 @@ BYTE_SIZE       = serial.EIGHTBITS
 STOP_BITS       = serial.STOPBITS_TWO
 PARITY          = serial.PARITY_ODD
 READ_SIZE       = 256
-FILE_READ_DELAY = 0.05
+FILE_READ_DELAY = 0.1
 
 logger = logging.getLogger("fastnet2n2k.input")
 
