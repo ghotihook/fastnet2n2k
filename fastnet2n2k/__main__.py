@@ -34,12 +34,23 @@ class _QuietTransientCanErrors(logging.Filter):
     and ``mapping.process_channel`` logs a single throttled summary when a send
     ultimately fails, so the per-attempt warnings add only noise. Genuine
     connection-lost errors are logged at ERROR and pass through untouched.
+
+    A record that can't be rendered is dropped. This matters at DEBUG: the library's
+    ``"Sent: %s"`` logs a ``can.Message`` whose ``timestamp`` can be a str (its seed
+    messages carry a string timestamp), and ``can.Message.__str__`` then raises
+    formatting it as a float. Left alone the exception propagates out of the filter
+    (logging does not guard filters) and kills the task; if we merely passed it on, the
+    handler would still spew a ``--- Logging error ---`` traceback. Dropping it avoids
+    both. (At INFO these DEBUG records are never created, so this costs nothing live.)
     """
 
     _NOISE = ("transmit queue full", "send failed without reconnecting")
 
     def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage().lower()
+        try:
+            msg = record.getMessage().lower()
+        except Exception:   # unrenderable args (e.g. can.Message with a str timestamp)
+            return False
         return not any(phrase in msg for phrase in self._NOISE)
 
 
