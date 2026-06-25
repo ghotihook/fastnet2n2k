@@ -156,3 +156,16 @@ def test_no_send_when_trigger_returns_none():
     update_live_data("Heel Angle", "0x34", None, " OFF", None)
     asyncio.run(mapping.process_channel("Heel Angle"))
     assert dev.sent == []
+
+
+def test_build_error_is_isolated(monkeypatch):
+    # A handler that raises must not crash the bridge or send anything.
+    def boom():
+        raise ValueError("bad value")
+    monkeypatch.setitem(mapping._CHANNEL_MAP, "Depth (Meters)", boom)
+    dev = _StubDevice()
+    mapping.set_device(dev)
+    mapping._channel_last_sent.clear()
+    update_live_data("Depth (Meters)", "0xC1", 15.2, "15.2", None)
+    asyncio.run(mapping.process_channel("Depth (Meters)"))   # must not raise
+    assert dev.sent == []

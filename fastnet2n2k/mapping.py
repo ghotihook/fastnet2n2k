@@ -365,7 +365,11 @@ async def process_channel(channel_name):
     if last_time is not None and now - last_time < MIN_SEND_INTERVAL:
         return
 
-    msg = trigger_n2k_frame(channel_name)
+    try:
+        msg = trigger_n2k_frame(channel_name)
+    except Exception as exc:   # noqa: BLE001 — one bad channel value mustn't kill the bridge
+        logger.warning("Frame build failed for %r (%s) — skipping", channel_name, exc)
+        return
     if msg is None:
         return
     if _device is None or not _device.ready:
