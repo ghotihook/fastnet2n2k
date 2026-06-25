@@ -196,9 +196,6 @@ instruments go quiet the output stops and consumers time the data out.
 | Sea / air temperature | 130312 | 5 | °C/°F→Kelvin |
 | Barometric pressure | 130314 | 5 | mbar→Pa |
 | Tidal set & drift | 129291 | 3 | set deg→rad, drift kn→m/s; reference per layout |
-| Raw apparent wind (speed + angle) | 65280 | 2 | B&G proprietary single frame |
-| Raw heading | 65281 | 2 | B&G proprietary single frame |
-| Raw boat speed | 65282 | 2 | B&G proprietary single frame |
 
 The **Priority** column is each PGN's NMEA 2000 standard CAN priority (0 = highest,
 7 = lowest) — the values used unless you override them all with `--n2k-priority N`.
@@ -206,11 +203,8 @@ The **Priority** column is each PGN's NMEA 2000 standard CAN priority (0 = highe
 **Units** are converted to NMEA 2000 SI. **Sign** comes straight from pyfastnet's
 decoded value. **True/Magnetic** is read from the pyfastnet `layout` field (the
 only place it exists); a bearing whose layout can't be resolved is skipped, never
-guessed. The B&G proprietary raw PGNs (65280–65282) carry the instruments' raw,
-unscaled values as a manufacturer frame: a 2-byte B&G header (`7D 81`) followed by
-the raw `uint16` value(s), little-endian, `0xFFFF` meaning "no data". The byte layout
-is identical to [fastnet2ip](https://github.com/ghotihook/fastnet2ip), so a single
-decoder handles frames from either bridge.
+guessed. The B&G proprietary raw PGNs (65280–65282) are deferred
+(manufacturer-specific layout).
 
 > **WiFi gateways:** if you feed a WiFi NMEA 2000 gateway downstream, configure it
 > for **unicast** UDP, not broadcast — WiFi broadcast is unacknowledged and

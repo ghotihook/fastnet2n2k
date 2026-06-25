@@ -18,13 +18,11 @@ Conventions:
 """
 
 import logging
-import struct
 import time
 from datetime import datetime, timezone
 from math import radians
 
 import nmea2000.pgns as pgns
-from nmea2000.message import NMEA2000Message
 
 from .live_store import get_live_data, get_live_display, live_data
 
@@ -32,14 +30,6 @@ logger = logging.getLogger("fastnet2n2k.mapping")
 
 MIN_SEND_INTERVAL = 0.05    # per-channel rate cap (~20 Hz); debounce only
 KN_MS             = 0.514444
-
-# B&G proprietary raw PGNs (65280-65282): 2-byte manufacturer header + raw u16
-# value(s), little-endian, 0xFFFF = "no data". Byte-for-byte identical to fastnet2ip's
-# encoder so the same consumer decodes frames from either bridge. The library's encoder
-# only knows registered PGNs, so we register trivial passthrough encode functions below
-# (see _register_proprietary_encoders) and hand-build the payload in the handlers.
-_PROP_MFR_HDR = struct.pack('<H', (4 << 13) | 381)   # → bytes 7D 81
-PROP_PRIORITY = 2    # CAN arbitration only; the proprietary payload carries no priority
 
 _channel_last_sent: dict = {}
 _device = None
@@ -83,41 +73,6 @@ def _build(pgn, priority, **fields):
         if f.id in fields:
             f.raw_value = None
             f.value = fields[f.id]
-    return msg
-
-
-# ── B&G proprietary raw PGNs (65280-65282) ────────────────────────────────────
-#
-# The nmea2000 encoder dispatches on ``encode_pgn_<PGN>`` existing in nmea2000.pgns
-# and raises for any PGN without one; unknown PGNs are treated as single-frame. We
-# register passthrough encoders that return the bytes the handler already packed onto
-# ``raw_can_data``, so the rest of the N2KDevice/SocketCAN path (CAN-ID, source-address
-# substitution, transmit) is reused unchanged.
-
-def _p_u16(v):
-    """Pack a raw value as the encoder does: ``None`` → 0xFFFF, else low 16 bits."""
-    return 0xFFFF if v is None else int(v) & 0xFFFF
-
-
-def _encode_proprietary(msg):
-    return bytes(msg.raw_can_data)
-
-
-def _register_proprietary_encoders():
-    for pgn in (65280, 65281, 65282):
-        setattr(pgns, f"encode_pgn_{pgn}", _encode_proprietary)
-
-
-_register_proprietary_encoders()
-
-
-def _build_proprietary(pgn, payload):
-    """Build a proprietary single-frame message: mfr header + ``payload`` raw bytes."""
-    msg = NMEA2000Message(PGN=pgn, id=f"proprietary{pgn}")
-    msg.source = 0
-    msg.priority = _priority_override if _priority_override is not None else PROP_PRIORITY
-    msg.timestamp = datetime.now(timezone.utc)
-    msg.raw_can_data = _PROP_MFR_HDR + payload
     return msg
 
 
@@ -191,31 +146,6 @@ def process_boatspeed():
         return None
     return _build(128259, 2, speedWaterReferenced=bs * KN_MS,
                   speedGroundReferenced=None, speedDirection=None)
-
-
-def process_wind_raw():
-    """PGN 65280: raw apparent wind speed + angle in one frame (both channels)."""
-    ws = get_live_data("Apparent Wind Speed (Raw)")
-    wa = get_live_data("Apparent Wind Angle (Raw)")
-    if ws is None and wa is None:
-        return None
-    return _build_proprietary(65280, struct.pack('<HH', _p_u16(ws), _p_u16(wa)))
-
-
-def process_heading_raw():
-    """PGN 65281: raw heading."""
-    hd = get_live_data("Heading (Raw)")
-    if hd is None:
-        return None
-    return _build_proprietary(65281, struct.pack('<H', _p_u16(hd)))
-
-
-def process_boatspeed_raw():
-    """PGN 65282: raw boatspeed."""
-    bs = get_live_data("Boatspeed (Raw)")
-    if bs is None:
-        return None
-    return _build_proprietary(65282, struct.pack('<H', _p_u16(bs)))
 
 
 def process_depth():
@@ -395,17 +325,16 @@ _CHANNEL_MAP = {
     "Cross Track Error":            process_xte,
     "Tidal Set":                    process_set_drift,
     "Tidal Drift":                  "covered by 'Tidal Set' (same frame)",
-    # B&G proprietary raw PGNs (65280-65282) — manufacturer-specific single frames.
-    "Boatspeed (Raw)":             process_boatspeed_raw,
-    "Heading (Raw)":               process_heading_raw,
-    "Apparent Wind Speed (Raw)":   process_wind_raw,
-    "Apparent Wind Angle (Raw)":   process_wind_raw,   # same 65280 frame (either triggers)
+    # Deferred: B&G proprietary raw PGNs (65280-65282) — manufacturer-specific. See TODO.md.
+    "Boatspeed (Raw)":             "TODO: proprietary PGN 65282 (deferred)",
+    "Heading (Raw)":               "TODO: proprietary PGN 65281 (deferred)",
+    "Apparent Wind Speed (Raw)":   "TODO: proprietary PGN 65280 (deferred)",
+    "Apparent Wind Angle (Raw)":   "TODO: proprietary PGN 65280 (deferred)",
 }
 
 # PGNs this node transmits — advertised to the bus by the N2KDevice.
 TX_PGNS = [127245, 127250, 127251, 127257, 127508, 128000, 128259, 128267,
-           128275, 129025, 129026, 129283, 129291, 130306, 130312, 130314,
-           65280, 65281, 65282]
+           128275, 129025, 129026, 129283, 129291, 130306, 130312, 130314]
 
 
 def trigger_n2k_frame(channel_name):

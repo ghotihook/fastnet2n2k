@@ -9,7 +9,6 @@ produced message actually encodes through the canboat codec.
 import asyncio
 import math
 import os
-import struct
 
 import pytest
 from fastnet_decoder import FrameBuffer
@@ -157,79 +156,3 @@ def test_no_send_when_trigger_returns_none():
     update_live_data("Heel Angle", "0x34", None, " OFF", None)
     asyncio.run(mapping.process_channel("Heel Angle"))
     assert dev.sent == []
-
-
-# ── B&G proprietary raw PGNs (65280-65282) ────────────────────────────────────
-
-def test_wind_raw_65280_layout():
-    update_live_data("Apparent Wind Speed (Raw)", "0x4E", 12345, "12345", None)
-    update_live_data("Apparent Wind Angle (Raw)", "0x52", 6000, "6000", None)
-    msg = mapping.process_wind_raw()
-    assert msg.PGN == 65280
-    assert msg.raw_can_data[:2] == b"\x7d\x81"      # B&G manufacturer header
-    assert len(msg.raw_can_data) == 6
-    ws, wa = struct.unpack("<HH", msg.raw_can_data[2:6])
-    assert (ws, wa) == (12345, 6000)
-
-
-def test_wind_raw_absent_field_is_ffff():
-    update_live_data("Apparent Wind Speed (Raw)", "0x4E", 12345, "12345", None)
-    update_live_data("Apparent Wind Angle (Raw)", "0x52", None, "", None)
-    msg = mapping.process_wind_raw()
-    assert struct.unpack("<HH", msg.raw_can_data[2:6]) == (12345, 0xFFFF)
-
-
-def test_heading_raw_65281():
-    update_live_data("Heading (Raw)", "0x4A", 4321, "4321", None)
-    msg = mapping.process_heading_raw()
-    assert msg.PGN == 65281
-    assert msg.raw_can_data[:2] == b"\x7d\x81"
-    assert len(msg.raw_can_data) == 4
-    assert struct.unpack("<H", msg.raw_can_data[2:4])[0] == 4321
-
-
-def test_boatspeed_raw_65282():
-    update_live_data("Boatspeed (Raw)", "0x42", 555, "555", None)
-    msg = mapping.process_boatspeed_raw()
-    assert msg.PGN == 65282
-    assert msg.raw_can_data[:2] == b"\x7d\x81"
-    assert len(msg.raw_can_data) == 4
-    assert struct.unpack("<H", msg.raw_can_data[2:4])[0] == 555
-
-
-def test_wind_raw_none_when_both_absent():
-    update_live_data("Apparent Wind Speed (Raw)", "0x4E", None, "", None)
-    update_live_data("Apparent Wind Angle (Raw)", "0x52", None, "", None)
-    assert mapping.process_wind_raw() is None
-
-
-def test_proprietary_encodes_single_can_frame():
-    update_live_data("Apparent Wind Speed (Raw)", "0x4E", 12345, "12345", None)
-    update_live_data("Apparent Wind Angle (Raw)", "0x52", 6000, "6000", None)
-    msg = mapping.process_wind_raw()
-    frames = NMEA2000Encoder(N2KFormat.PYTHON_CAN).encode(msg)
-    assert len(frames) == 1                          # single frame, not fast-packet
-    m = frames[0]
-    assert (m.arbitration_id >> 8) & 0x3FFFF == 65280
-    assert bytes(m.data)[: len(msg.raw_can_data)] == msg.raw_can_data
-
-
-def test_proprietary_wire_matches_fastnet2ip():
-    # Byte-for-byte contract with fastnet2ip's encoder (and flightrecorder's decoder):
-    # 7D 81 mfr header + raw u16 little-endian, no scaling.
-    update_live_data("Apparent Wind Speed (Raw)", "0x4E", 12345, "12345", None)
-    update_live_data("Apparent Wind Angle (Raw)", "0x52", 6000, "6000", None)
-    expected = struct.pack("<H", (4 << 13) | 381) + struct.pack("<HH", 12345, 6000)
-    assert mapping.process_wind_raw().raw_can_data == expected
-
-
-def test_wind_raw_throttled_to_one_send():
-    dev = _StubDevice()
-    mapping.set_device(dev)
-    mapping._channel_last_sent.clear()
-    update_live_data("Apparent Wind Speed (Raw)", "0x4E", 12345, "12345", None)
-    update_live_data("Apparent Wind Angle (Raw)", "0x52", 6000, "6000", None)
-    asyncio.run(mapping.process_channel("Apparent Wind Speed (Raw)"))   # first → sends
-    asyncio.run(mapping.process_channel("Apparent Wind Speed (Raw)"))   # <0.05s → throttled
-    assert len(dev.sent) == 1
-    assert dev.sent[0].PGN == 65280
