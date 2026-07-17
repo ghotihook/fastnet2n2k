@@ -119,9 +119,9 @@ After=network.target
 Type=simple
 User=root
 
-# Bring can0 up at the NMEA2000 bitrate before starting.
-# restart-ms 100 lets the controller auto-recover from a bus-off.
-ExecStartPre=/bin/sh -c 'ip link set can0 down 2>/dev/null; ip link set can0 up type can bitrate 250000 restart-ms 100'
+# Bring can0 up at the NMEA2000 bitrate — only if it isn't already up, so this is
+# safe alongside another CAN service (e.g. an n2k2ip gateway) sharing can0.
+ExecStartPre=/bin/sh -c 'ip link show can0 | grep -qw UP || ip link set can0 up type can bitrate 250000 restart-ms 100 2>/dev/null; ip link show can0 | grep -qw UP'
 
 ExecStart=/usr/local/bin/fastnet2n2k --serial /dev/ttyUSB0 --channel can0
 Restart=always
