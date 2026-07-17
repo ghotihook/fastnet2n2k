@@ -1,15 +1,18 @@
 # systemd unit for the fastnet2n2k bridge.
 #
-# Install into a dedicated system venv (NOT a pipx ~/.local install — a root-run
-# service can't rely on a user's PATH):
-#   sudo python3 -m venv /opt/fastnet2n2k
-#   sudo /opt/fastnet2n2k/bin/pip install fastnet2n2k
+# Install globally with pipx (--global lands the command in /usr/local/bin, where
+# a root-run service can reach it — a plain `pipx install` goes to ~/.local/bin,
+# which it can't). Needs pipx >= 1.5; run `which fastnet2n2k` to confirm the path.
+#   sudo apt install pipx                        # once, if you don't have it
+#   sudo pipx install --global fastnet2n2k       # -> /usr/local/bin/fastnet2n2k
 #
 # Then edit the --serial device below to match your install, and:
 #   sudo cp fastnet2n2k.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now fastnet2n2k.service
 #   journalctl -u fastnet2n2k.service -f
+#
+# Update later with: sudo pipx upgrade --global fastnet2n2k
 
 [Unit]
 Description=fastnet2n2k Service
@@ -18,13 +21,12 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/fastnet2n2k
 
 # Bring can0 up at the NMEA2000 bitrate before starting.
 # restart-ms 100 lets the controller auto-recover from a bus-off.
 ExecStartPre=/bin/sh -c 'ip link set can0 down 2>/dev/null; ip link set can0 up type can bitrate 250000 restart-ms 100'
 
-ExecStart=/opt/fastnet2n2k/bin/fastnet2n2k --serial /dev/ttyUSB0 --channel can0
+ExecStart=/usr/local/bin/fastnet2n2k --serial /dev/ttyUSB0 --channel can0
 Restart=always
 RestartSec=10
 

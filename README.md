@@ -90,18 +90,19 @@ restarts on failure. The unit runs as **root** (consistent with
 [fastnet2ip](https://github.com/ghotihook/fastnet2ip)) and brings `can0` up itself
 before starting.
 
-> **Don't use the pipx install for the service.** pipx installs into a *user's*
-> `~/.local/bin`, which a root-run service can't rely on. Install into a dedicated
-> system virtual environment instead.
+> **Install it globally, not per-user.** A plain `pipx install` goes to a user's
+> `~/.local/bin`, which a root-run service can't rely on. Use `pipx install
+> --global` so the command lands in `/usr/local/bin` instead.
 
-**1. Install into a dedicated venv**
+**1. Install globally with pipx**
 
 ```bash
-sudo python3 -m venv /opt/fastnet2n2k
-sudo /opt/fastnet2n2k/bin/pip install fastnet2n2k
+sudo apt install pipx                        # once, if you don't have it
+sudo pipx install --global fastnet2n2k
 ```
 
-This gives you `/opt/fastnet2n2k/bin/fastnet2n2k`, the path the unit below uses.
+This gives you `/usr/local/bin/fastnet2n2k`, the path the unit below uses.
+(`--global` needs pipx ≥ 1.5; run `which fastnet2n2k` to confirm the path.)
 
 **2. Create the unit file**
 
@@ -117,13 +118,12 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/fastnet2n2k
 
 # Bring can0 up at the NMEA2000 bitrate before starting.
 # restart-ms 100 lets the controller auto-recover from a bus-off.
 ExecStartPre=/bin/sh -c 'ip link set can0 down 2>/dev/null; ip link set can0 up type can bitrate 250000 restart-ms 100'
 
-ExecStart=/opt/fastnet2n2k/bin/fastnet2n2k --serial /dev/ttyUSB0 --channel can0
+ExecStart=/usr/local/bin/fastnet2n2k --serial /dev/ttyUSB0 --channel can0
 Restart=always
 RestartSec=10
 
@@ -153,7 +153,7 @@ journalctl -u fastnet2n2k.service -f      # follow the logs
 ```
 
 To upgrade later:
-`sudo /opt/fastnet2n2k/bin/pip install --upgrade fastnet2n2k && sudo systemctl restart fastnet2n2k`.
+`sudo pipx upgrade --global fastnet2n2k && sudo systemctl restart fastnet2n2k`.
 
 ## Command-line options
 
