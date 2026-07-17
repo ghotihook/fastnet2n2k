@@ -82,3 +82,24 @@ Longer term, replace this bespoke Fastnet→NMEA 2000 mapping with a **Signal K*
 path so the whole boat data pipeline is unified (Signal K owns the N2K output, dedupe,
 and cadence). When that lands, this custom `mapping.py` / cadence logic — and the
 rate work above — goes away rather than being polished here.
+
+## Investigate: dedicated can0.service vs inline ExecStartPre
+
+Today both fastnet2n2k and n2k2ip bring can0 up with an idempotent `ExecStartPre`
+one-liner (only configures the link if it isn't already up), which is safe to run
+with multiple CAN services sharing can0 on one host. Works fine as-is.
+
+Cleaner alternative for a multi-service box: a single oneshot `can0.service`
+(`Type=oneshot`, `RemainAfterExit=yes`) that owns the bitrate / `restart-ms`
+config, with each bridge dropping its `ExecStartPre` and declaring
+`Requires=can0.service` + `After=can0.service`. Benefits: one source of truth for
+the CAN config (no duplicated shell across units that can drift), real dependency
+modelling, and the start-up race goes away structurally instead of being swallowed.
+
+Wrinkle: can0 setup is a machine-level concern, not owned by either PyPI package —
+so keep the inline `ExecStartPre` as the standalone default and ship `can0.service`
+as an *optional* template for multi-service hosts. The two are compatible: with
+`can0.service` present, the inline `ExecStartPre` just sees can0 already up and
+no-ops.
+
+Leave as-is for now; revisit if the multi-service setup grows.
