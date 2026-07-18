@@ -30,7 +30,7 @@ User=root
 # brought up at all.
 ExecStartPre=/bin/sh -c 'ip link show can0 | grep -qw UP || ip link set can0 up type can bitrate 250000 restart-ms 100 2>/dev/null; ip link show can0 | grep -qw UP'
 
-ExecStart=/usr/local/bin/fastnet2n2k --serial /dev/ttyUSB0 --channel can0
+ExecStart=/usr/local/bin/fastnet2n2k --serial /dev/ttyAMA5 --channel can0
 Restart=always
 RestartSec=10
 
