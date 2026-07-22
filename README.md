@@ -7,11 +7,6 @@ SocketCAN. Built for the
 [M5Stack CoreMP135](https://docs.m5stack.com/en/core/M5CoreMP135) but runs on any
 Linux box with a SocketCAN interface. Requires **Python 3.10+**.
 
-NMEA 2000 runs at **250 kbit/s** with 29-bit extended IDs. Message encoding,
-CAN-ID construction, fast-packet framing and ISO address claiming are handled by
-the [`nmea2000`](https://github.com/tomer-w/nmea2000) library (canboat-based) on
-top of `python-can`'s socketcan backend.
-
 ## Quick start
 
 **1. Install** the CLI in its own isolated environment with
@@ -70,7 +65,7 @@ to end up:
 
 | Project | What it does | Use it when |
 |---|---|---|
-| [pyfastnet](https://github.com/ghotihook/pyfastnet) | **Decoder library.** Turns raw Fastnet bytes into named instrument channels. | You're writing your own Python and want the decoded data. |
+| [pyfastnet](https://github.com/ghotihook/pyfastnet) | **Decoder library.** Turns raw Fastnet bytes into Signal K paths in SI units. | You're writing your own Python and want the decoded data. |
 | [fastnet2ip](https://github.com/ghotihook/fastnet2ip) | **Serial → network.** Broadcasts decoded data over UDP as NMEA 0183 or NMEA 2000 (over IP). | Feeding Signal K, OpenCPN, or a plotter over WiFi / Ethernet. |
 | **fastnet2n2k** *(this app)* | **Serial → physical NMEA 2000 bus.** Transmits PGNs onto a CAN backbone via SocketCAN. | Wiring into a real NMEA 2000 network / chartplotter. |
 
@@ -185,27 +180,32 @@ instruments go quiet the output stops and consumers time the data out.
 
 | Data | PGN | Priority | Notes |
 |---|---|---|---|
-| Heading | 127250 | 2 | T/M reference taken from the Fastnet display layout (`°M`/`°T`) |
-| Apparent / True wind, TWD | 130306 | 2 | knots→m/s, deg→rad; reference per layout |
-| Boat speed | 128259 | 2 | knots→m/s |
-| Depth | 128267 | 3 | metres |
+| Heading | 127250 | 2 | Magnetic or True per the instrument |
+| Apparent / True wind, TWD | 130306 | 2 | reference per the instrument |
+| Boat speed | 128259 | 2 | |
+| Depth | 128267 | 3 | |
 | COG/SOG | 129026 | 2 | prefers True COG, falls back to Magnetic |
-| Attitude (heel/trim) | 127257 | 3 | signed value passed through unchanged |
+| Attitude (heel/trim) | 127257 | 3 | |
 | Rudder, Leeway, Rate of turn | 127245 / 128000 / 127251 | 2 / 4 / 2 | |
-| Distance log, XTE | 128275 / 129283 | 6 / 3 | NM→m |
+| Distance log, XTE | 128275 / 129283 | 6 / 3 | |
 | Position | 129025 | 2 | |
-| Sea / air temperature | 130312 | 5 | °C/°F→Kelvin |
-| Barometric pressure | 130314 | 5 | mbar→Pa |
-| Tidal set & drift | 129291 | 3 | set deg→rad, drift kn→m/s; reference per layout |
+| Sea / air temperature | 130312 | 5 | |
+| Barometric pressure | 130314 | 5 | |
+| Tidal set & drift | 129291 | 3 | reference per the instrument |
 
 The **Priority** column is each PGN's NMEA 2000 standard CAN priority (0 = highest,
 7 = lowest) — the values used unless you override them all with `--n2k-priority N`.
 
-**Units** are converted to NMEA 2000 SI. **Sign** comes straight from pyfastnet's
-decoded value. **True/Magnetic** is read from the pyfastnet `layout` field (the
-only place it exists); a bearing whose layout can't be resolved is skipped, never
-guessed. The B&G proprietary raw PGNs (65280–65282) are deferred
-(manufacturer-specific layout).
+Data arrives from pyfastnet 3.0 already in **SI** on Signal K paths, so it maps
+almost 1:1 onto NMEA 2000 — no unit conversion here. **Sign** comes straight from the
+decoded value; **True vs Magnetic** is carried by the path (the B&G instrument's own
+reference — the Fastnet stream has no variation to convert). The B&G proprietary raw
+PGNs (65280–65282) are not emitted.
+
+Encoding, CAN-ID construction, fast-packet framing and ISO address claiming (250
+kbit/s, 29-bit IDs) are handled by the
+[`nmea2000`](https://github.com/tomer-w/nmea2000) library (canboat-based) on top of
+`python-can`'s socketcan backend.
 
 > **WiFi gateways:** if you feed a WiFi NMEA 2000 gateway downstream, configure it
 > for **unicast** UDP, not broadcast — WiFi broadcast is unacknowledged and
