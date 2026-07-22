@@ -30,25 +30,16 @@ logger = logging.getLogger("fastnet2n2k")
 
 
 class _QuietTransientCanErrors(logging.Filter):
-    """Drop the nmea2000 client's per-failure spam when the CAN transmit buffer is
-    full (ENOBUFS / error 105) — including the ``exc_info`` tracebacks it logs.
+    """Drop per-frame spam when the CAN transmit buffer is full (ENOBUFS): the
+    nmea2000 library retries internally and ``mapping.process_channel`` logs one
+    throttled summary, so the per-attempt warnings (with tracebacks) add only noise.
+    Genuine connection-lost errors are logged at ERROR and pass through.
 
-    These fire on every frame when the bus can't drain (e.g. no other node is
-    acknowledging), flooding the journal. The library already retries internally,
-    and ``mapping.process_channel`` logs a single throttled summary when a send
-    ultimately fails, so the per-attempt warnings add only noise. Genuine
-    connection-lost errors are logged at ERROR and pass through untouched.
-
-    A record that can't be rendered is dropped. This matters at DEBUG: the library's
-    seed messages (built from a hard-coded JSON blob in ``ioclient._seed_network_map``)
-    carry a *string* ``timestamp``, so ``can.Message.__str__`` raises ``ValueError``
-    formatting it as a float. Two different loggers stringify that message at DEBUG —
-    nmea2000's own ``"Sent: %s"`` and python-can's ``"sending: %s"`` (in
-    ``can.interfaces.socketcan.socketcan``) — so the filter is attached to the root
-    handler rather than one logger, catching the bad record whichever emits it. Left
-    alone the exception would surface as a ``--- Logging error ---`` traceback on every
-    seed send. (At INFO these DEBUG records are never created, so this costs nothing
-    live.)
+    Also drops any record that can't be rendered: at DEBUG, the library's seed
+    messages carry a string timestamp that crashes ``can.Message.__str__``, which
+    would otherwise print a ``--- Logging error ---`` traceback per seed send.
+    Attached to the root handler because the bad record can come from either the
+    nmea2000 or the python-can logger.
     """
 
     _NOISE = ("transmit queue full", "send failed without reconnecting")
@@ -124,6 +115,7 @@ async def _print_live_loop(fb) -> None:
 
 
 async def run(args: argparse.Namespace) -> int:
+    logger.info("fastnet2n2k %s", __version__)
     try:
         device = make_device(args)
     except (OSError, can.CanError) as exc:
@@ -155,13 +147,9 @@ async def run(args: argparse.Namespace) -> int:
     fb = FrameBuffer()
     loop = asyncio.get_running_loop()
 
-    # Event-driven input — no per-read thread (the old asyncio.to_thread per iteration
-    # dominated CPU via ThreadPoolExecutor handoff). A live serial port is registered
-    # with the loop and wakes us when bytes arrive; a file is paced on the loop.
-    # SerialReader also runs a low-rate safety poll and a silence watchdog that
-    # close/reopens the port when no bytes arrive — the cure for the Pi UART coming up
-    # with dead RX on the first open after a cold boot (the "works only on the second
-    # run" bug; polling alone can't read bytes that never reach the fd).
+    # Live serial is event-driven on the loop (no per-read thread); SerialReader also
+    # runs a safety poll and a silence watchdog that reopens the port when no bytes
+    # arrive — see input_source.py for why. A file is paced on the loop directly.
     reader = None
     queue: asyncio.Queue = asyncio.Queue()
     if not is_file:
@@ -185,8 +173,6 @@ async def run(args: argparse.Namespace) -> int:
             fb.get_complete_frames()
             while not fb.frame_queue.empty():
                 await _dispatch_frame(fb.frame_queue.get())
-    except KeyboardInterrupt:
-        logger.info("Stopping")
     finally:
         if printer is not None:
             printer.cancel()

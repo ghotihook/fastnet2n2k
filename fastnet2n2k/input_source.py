@@ -63,11 +63,10 @@ SAFETY_POLL_INTERVAL = 0.1
 
 # Silence threshold before the port is closed and reopened. Fastnet chatter is
 # continuous while the instruments are powered, so a port silent this long is either
-# on a bus that's off (reopening is then harmless) or has dead RX — which happens on
-# the Pi UART's first open after a cold boot: no bytes ever arrive at the fd no matter
-# how it is polled, and only a close/reopen restores reception (the manual "stop it
-# and run it again" workaround, automated). The 3.1.1 safety poll alone did not fix
-# that first-boot hang because the fault is below the event loop, in the port itself.
+# on a bus that's off (reopening is then harmless) or has dead RX — which the Pi UART
+# exhibits on its first open after a cold boot: no bytes ever reach the fd no matter
+# how it is polled, and only a close/reopen restores reception. (Hardware-verified
+# fix for the "works only on the second run" bug; polling alone cannot cure it.)
 SILENCE_REOPEN_INTERVAL = 5.0
 
 

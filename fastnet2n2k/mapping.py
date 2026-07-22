@@ -289,6 +289,8 @@ TX_PGNS = [127245, 127250, 127251, 127257, 127508, 128000, 128259, 128267,
 
 
 def trigger_n2k_frame(path):
+    """Build (without sending) the message ``path`` would emit, or None.
+    Not on the live send path — used by the tests and handy for debugging."""
     entry = _CHANNEL_MAP.get(path)
     if callable(entry):
         return entry()
@@ -308,8 +310,9 @@ async def process_channel(path):
     fast-updating path can't flood the bus or CPU. ``_channel_last_sent`` holds the
     monotonic time of each path's last send.
     """
-    if not callable(_CHANNEL_MAP.get(path)):
-        return
+    trigger = _CHANNEL_MAP.get(path)
+    if not callable(trigger):
+        return   # sentinel-string or unknown path
 
     now = time.monotonic()
     last_time = _channel_last_sent.get(path)
@@ -317,7 +320,7 @@ async def process_channel(path):
         return
 
     try:
-        msg = trigger_n2k_frame(path)
+        msg = trigger()
     except Exception as exc:   # noqa: BLE001 — one bad value mustn't kill the bridge
         logger.warning("Frame build failed for %r (%s) — skipping", path, exc)
         return
