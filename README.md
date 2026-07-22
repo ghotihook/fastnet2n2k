@@ -18,11 +18,12 @@ top of `python-can`'s socketcan backend.
 [pipx](https://pipx.pypa.io/):
 
 ```bash
-pipx install fastnet2n2k
+sudo pipx install --global fastnet2n2k
 ```
 
-This puts a `fastnet2n2k` command on your PATH. `python -m fastnet2n2k ...` also
-works once installed.
+This puts a `fastnet2n2k` command on your PATH (in `/usr/local/bin`, so a
+root-run systemd service can find it too). `python -m fastnet2n2k ...` also works
+once installed. (`--global` needs pipx ≥ 1.5.)
 
 **2. Bring up the CAN bus** (once per boot — `restart-ms 100` lets the controller
 auto-recover from a bus-off):
