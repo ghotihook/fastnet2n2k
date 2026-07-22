@@ -19,7 +19,12 @@ from nmea2000.device import N2KDevice
 
 from . import __version__, mapping
 from .display import print_live_data
-from .input_source import FILE_READ_DELAY, attach_serial_reader, initialize_input_source
+from .input_source import (
+    FILE_READ_DELAY,
+    attach_serial_reader,
+    initialize_input_source,
+    serial_safety_poll,
+)
 from .live_store import update_live_data
 
 logger = logging.getLogger("fastnet2n2k")
@@ -36,12 +41,15 @@ class _QuietTransientCanErrors(logging.Filter):
     connection-lost errors are logged at ERROR and pass through untouched.
 
     A record that can't be rendered is dropped. This matters at DEBUG: the library's
-    ``"Sent: %s"`` logs a ``can.Message`` whose ``timestamp`` can be a str (its seed
-    messages carry a string timestamp), and ``can.Message.__str__`` then raises
-    formatting it as a float. Left alone the exception propagates out of the filter
-    (logging does not guard filters) and kills the task; if we merely passed it on, the
-    handler would still spew a ``--- Logging error ---`` traceback. Dropping it avoids
-    both. (At INFO these DEBUG records are never created, so this costs nothing live.)
+    seed messages (built from a hard-coded JSON blob in ``ioclient._seed_network_map``)
+    carry a *string* ``timestamp``, so ``can.Message.__str__`` raises ``ValueError``
+    formatting it as a float. Two different loggers stringify that message at DEBUG —
+    nmea2000's own ``"Sent: %s"`` and python-can's ``"sending: %s"`` (in
+    ``can.interfaces.socketcan.socketcan``) — so the filter is attached to the root
+    handler rather than one logger, catching the bad record whichever emits it. Left
+    alone the exception would surface as a ``--- Logging error ---`` traceback on every
+    seed send. (At INFO these DEBUG records are never created, so this costs nothing
+    live.)
     """
 
     _NOISE = ("transmit queue full", "send failed without reconnecting")
@@ -150,11 +158,16 @@ async def run(args: argparse.Namespace) -> int:
 
     # Event-driven input — no per-read thread (the old asyncio.to_thread per iteration
     # dominated CPU via ThreadPoolExecutor handoff). A live serial port is registered
-    # with the loop and wakes us only when bytes arrive; a file is paced on the loop.
+    # with the loop and wakes us when bytes arrive; a file is paced on the loop. A
+    # low-rate safety poll backstops the serial fd: on the Pi UART the readable
+    # notification can fail to wake the loop on the first-after-boot run, so without it
+    # the loop blocks forever on an empty queue (the "works only on the second run" bug).
     serial_fd = None
+    poller = None
     queue: asyncio.Queue = asyncio.Queue()
     if not is_file:
         serial_fd = attach_serial_reader(loop, source, queue)
+        poller = asyncio.create_task(serial_safety_poll(source, queue))
 
     printer = asyncio.create_task(_print_live_loop(fb)) if args.live_data else None
     try:
@@ -178,6 +191,8 @@ async def run(args: argparse.Namespace) -> int:
     finally:
         if printer is not None:
             printer.cancel()
+        if poller is not None:
+            poller.cancel()
         if serial_fd is not None:
             loop.remove_reader(serial_fd)
         await device.close()
@@ -193,8 +208,13 @@ def main() -> int:
         level=level, format="%(asctime)s [%(name)s] %(levelname)-5s %(message)s")
     # The nmea2000 client is chatty at DEBUG; keep it in step with our level.
     logging.getLogger("nmea2000").setLevel(level)
-    # …but drop its transmit-buffer-full tracebacks; we summarise those ourselves.
-    logging.getLogger("nmea2000.ioclient").addFilter(_QuietTransientCanErrors())
+    # Drop transmit-buffer-full spam (we summarise that ourselves) and any record that
+    # can't be rendered — e.g. python-can stringifying a seed message with a string
+    # timestamp. Attached to the root handler so it covers every logger, not just
+    # nmea2000.ioclient (the broken seed-send record comes from python-can's own logger).
+    _quiet = _QuietTransientCanErrors()
+    for _handler in logging.getLogger().handlers:
+        _handler.addFilter(_quiet)
     try:
         return asyncio.run(run(args))
     except KeyboardInterrupt:

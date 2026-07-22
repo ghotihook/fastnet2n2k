@@ -4,6 +4,7 @@ Fastnet line settings are 28800 baud, 8 data bits, 2 stop bits, odd parity.
 Ported from fastnet2ip/core/input.py.
 """
 
+import asyncio
 import logging
 
 import serial
@@ -53,25 +54,54 @@ def initialize_input_source(serial_port=None, file_path=None):
         raise SystemExit(1)
 
 
+def _drain_port(ser, queue):
+    """Read whatever is buffered on ``ser`` (non-blocking) and, if any, queue it.
+    Safe to call from both the fd-readable callback and the safety-net poll: the loop
+    is single-threaded, so the two never overlap and byte order is preserved."""
+    try:
+        chunk = ser.read(READ_SIZE)
+    except (OSError, serial.SerialException) as exc:
+        logger.error("Serial read error: %s", exc)
+        return
+    if chunk:
+        queue.put_nowait(chunk)
+
+
 def attach_serial_reader(loop, ser, queue):
-    """Register ``ser``'s fd with the asyncio event loop so it wakes only when bytes
-    are available, pushing each chunk onto ``queue``. Returns the fd so the caller can
+    """Register ``ser``'s fd with the asyncio event loop so it wakes when bytes are
+    available, pushing each chunk onto ``queue``. Returns the fd so the caller can
     ``loop.remove_reader(fd)`` on shutdown.
 
     Replaces the old thread-per-read model: the port is opened non-blocking
     (``timeout=0``), so ``read`` in the callback returns immediately with whatever is
-    buffered, and there is no ThreadPoolExecutor handoff per chunk.
+    buffered, and there is no ThreadPoolExecutor handoff per chunk. Pair with
+    :func:`serial_safety_poll` — on the Pi UART this readable notification can fail to
+    wake the loop on the first-after-boot run, so the poll guarantees the port is
+    drained regardless.
     """
     fd = ser.fileno()
-
-    def _on_readable():
-        try:
-            chunk = ser.read(READ_SIZE)
-        except (OSError, serial.SerialException) as exc:
-            logger.error("Serial read error: %s", exc)
-            return
-        if chunk:
-            queue.put_nowait(chunk)
-
-    loop.add_reader(fd, _on_readable)
+    loop.add_reader(fd, lambda: _drain_port(ser, queue))
     return fd
+
+
+# Safety-net poll rate. The add_reader fast path handles reads with ~zero latency when
+# it fires; this only backstops a missed wakeup, so it need not be fast — 10 Hz bounds
+# worst-case read latency to ~100 ms (well under any consumer's PGN timeout) while
+# costing a single non-blocking read per tick (no thread handoff), negligible on the SBC.
+SAFETY_POLL_INTERVAL = 0.1
+
+
+async def serial_safety_poll(ser, queue, interval=SAFETY_POLL_INTERVAL):
+    """Periodically drain the serial port even if ``add_reader`` never fires.
+
+    On the Raspberry Pi UART the loop's fd-readiness notification can register but not
+    wake ``select()`` on a cold-boot run; the loop then blocks forever on an empty
+    queue and no Fastnet frames are ever read ("works only on the second run"). A
+    steady low-rate poll makes reading reliable — it was the accidental effect of
+    ``--live-data`` (its 1 Hz print task) and of ``--file`` mode's per-iteration sleep,
+    both of which kept the loop ticking; this makes that guarantee explicit and
+    always-on for live serial input.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        _drain_port(ser, queue)
