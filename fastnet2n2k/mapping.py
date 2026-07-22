@@ -133,10 +133,16 @@ def process_boatspeed():
 
 
 def process_depth():
-    dm = get_live_data("environment.depth.belowTransducer")   # m
+    # The H2000 applies its keel offset internally, so the number on the Fastnet
+    # wire is already depth-below-keel (despite pyfastnet's belowTransducer label —
+    # Fastnet carries no offset field to say otherwise). We put it in PGN 128267's
+    # depth field and set offset=0.0 ("transducer at keel level"): consumers then
+    # compute below-keel = depth + offset = the H2000 value, and the explicit zero
+    # signals "no further correction needed" rather than "offset unknown" (None).
+    dm = get_live_data("environment.depth.belowTransducer")   # m, already below-keel
     if dm is None:
         return None
-    return _build(128267, 3, depth=dm, offset=None, range=None)
+    return _build(128267, 3, depth=dm, offset=0.0, range=None)
 
 
 def process_rudder():
