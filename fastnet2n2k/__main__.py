@@ -98,6 +98,13 @@ def make_device(args: argparse.Namespace) -> N2KDevice:
         model_version=__version__,
         software_version_code=__version__,
         transmit_pgns=mapping.TX_PGNS,
+        # The nmea2000 library builds its ISO Acknowledgement/NAK (PGN 59392) with
+        # groupFunction=255, but that field is 8-bit unsigned whose encoder reserves
+        # 255 as "not available" (valid max 254) — so the NAK can never be encoded and
+        # every attempt is dropped with "Raw value 255 out of range". A bus node
+        # probing an unsupported PGN triggers it. NAKing is optional and never actually
+        # reached the bus, so suppress it at the source rather than log the noise.
+        disable_naks=True,
     )
 
 
