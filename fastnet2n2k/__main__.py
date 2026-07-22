@@ -21,9 +21,8 @@ from . import __version__, mapping
 from .display import print_live_data
 from .input_source import (
     FILE_READ_DELAY,
-    attach_serial_reader,
+    SerialReader,
     initialize_input_source,
-    serial_safety_poll,
 )
 from .live_store import update_live_data
 
@@ -158,16 +157,16 @@ async def run(args: argparse.Namespace) -> int:
 
     # Event-driven input — no per-read thread (the old asyncio.to_thread per iteration
     # dominated CPU via ThreadPoolExecutor handoff). A live serial port is registered
-    # with the loop and wakes us when bytes arrive; a file is paced on the loop. A
-    # low-rate safety poll backstops the serial fd: on the Pi UART the readable
-    # notification can fail to wake the loop on the first-after-boot run, so without it
-    # the loop blocks forever on an empty queue (the "works only on the second run" bug).
-    serial_fd = None
-    poller = None
+    # with the loop and wakes us when bytes arrive; a file is paced on the loop.
+    # SerialReader also runs a low-rate safety poll and a silence watchdog that
+    # close/reopens the port when no bytes arrive — the cure for the Pi UART coming up
+    # with dead RX on the first open after a cold boot (the "works only on the second
+    # run" bug; polling alone can't read bytes that never reach the fd).
+    reader = None
     queue: asyncio.Queue = asyncio.Queue()
     if not is_file:
-        serial_fd = attach_serial_reader(loop, source, queue)
-        poller = asyncio.create_task(serial_safety_poll(source, queue))
+        reader = SerialReader(loop, source, queue)
+        reader.start()
 
     printer = asyncio.create_task(_print_live_loop(fb)) if args.live_data else None
     try:
@@ -191,13 +190,9 @@ async def run(args: argparse.Namespace) -> int:
     finally:
         if printer is not None:
             printer.cancel()
-        if poller is not None:
-            poller.cancel()
-        if serial_fd is not None:
-            loop.remove_reader(serial_fd)
+        if reader is not None:
+            await reader.stop()   # cancels the poll task, detaches the fd, closes the port
         await device.close()
-        if not is_file:
-            source.close()
     return 0
 
 

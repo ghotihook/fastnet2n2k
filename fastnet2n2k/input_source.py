@@ -6,6 +6,7 @@ Ported from fastnet2ip/core/input.py.
 
 import asyncio
 import logging
+import time
 
 import serial
 
@@ -54,54 +55,111 @@ def initialize_input_source(serial_port=None, file_path=None):
         raise SystemExit(1)
 
 
-def _drain_port(ser, queue):
-    """Read whatever is buffered on ``ser`` (non-blocking) and, if any, queue it.
-    Safe to call from both the fd-readable callback and the safety-net poll: the loop
-    is single-threaded, so the two never overlap and byte order is preserved."""
-    try:
-        chunk = ser.read(READ_SIZE)
-    except (OSError, serial.SerialException) as exc:
-        logger.error("Serial read error: %s", exc)
-        return
-    if chunk:
-        queue.put_nowait(chunk)
-
-
-def attach_serial_reader(loop, ser, queue):
-    """Register ``ser``'s fd with the asyncio event loop so it wakes when bytes are
-    available, pushing each chunk onto ``queue``. Returns the fd so the caller can
-    ``loop.remove_reader(fd)`` on shutdown.
-
-    Replaces the old thread-per-read model: the port is opened non-blocking
-    (``timeout=0``), so ``read`` in the callback returns immediately with whatever is
-    buffered, and there is no ThreadPoolExecutor handoff per chunk. Pair with
-    :func:`serial_safety_poll` — on the Pi UART this readable notification can fail to
-    wake the loop on the first-after-boot run, so the poll guarantees the port is
-    drained regardless.
-    """
-    fd = ser.fileno()
-    loop.add_reader(fd, lambda: _drain_port(ser, queue))
-    return fd
-
-
 # Safety-net poll rate. The add_reader fast path handles reads with ~zero latency when
 # it fires; this only backstops a missed wakeup, so it need not be fast — 10 Hz bounds
 # worst-case read latency to ~100 ms (well under any consumer's PGN timeout) while
 # costing a single non-blocking read per tick (no thread handoff), negligible on the SBC.
 SAFETY_POLL_INTERVAL = 0.1
 
+# Silence threshold before the port is closed and reopened. Fastnet chatter is
+# continuous while the instruments are powered, so a port silent this long is either
+# on a bus that's off (reopening is then harmless) or has dead RX — which happens on
+# the Pi UART's first open after a cold boot: no bytes ever arrive at the fd no matter
+# how it is polled, and only a close/reopen restores reception (the manual "stop it
+# and run it again" workaround, automated). The 3.1.1 safety poll alone did not fix
+# that first-boot hang because the fault is below the event loop, in the port itself.
+SILENCE_REOPEN_INTERVAL = 5.0
 
-async def serial_safety_poll(ser, queue, interval=SAFETY_POLL_INTERVAL):
-    """Periodically drain the serial port even if ``add_reader`` never fires.
 
-    On the Raspberry Pi UART the loop's fd-readiness notification can register but not
-    wake ``select()`` on a cold-boot run; the loop then blocks forever on an empty
-    queue and no Fastnet frames are ever read ("works only on the second run"). A
-    steady low-rate poll makes reading reliable — it was the accidental effect of
-    ``--live-data`` (its 1 Hz print task) and of ``--file`` mode's per-iteration sleep,
-    both of which kept the loop ticking; this makes that guarantee explicit and
-    always-on for live serial input.
+class SerialReader:
+    """Drive a live serial port and keep it alive.
+
+    Three cooperating mechanisms, all on the event loop (single-threaded, so reads
+    never overlap and byte order is preserved):
+
+    - ``add_reader`` fast path: the fd wakes the loop the moment bytes arrive.
+    - 10 Hz safety poll: drains the port even if the readable notification is missed.
+    - Silence watchdog: if no bytes arrive for ``SILENCE_REOPEN_INTERVAL``, close and
+      reopen the port. This is the actual cure for the first-boot dead-RX UART; the
+      first two mechanisms cannot read bytes that never reach the fd.
     """
-    while True:
-        await asyncio.sleep(interval)
-        _drain_port(ser, queue)
+
+    def __init__(self, loop, ser, queue):
+        self._loop = loop
+        self._ser = ser
+        self._queue = queue
+        self._fd = None
+        self._poll_task = None
+        self._last_rx = time.monotonic()
+        self._silent_reopens = 0
+
+    def start(self):
+        """Attach the fd to the loop and start the poll/watchdog task."""
+        self._attach()
+        self._poll_task = asyncio.create_task(self._poll_loop())
+
+    async def stop(self):
+        """Cancel the poll task, detach the fd and close the port."""
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+        self._detach()
+        self._ser.close()
+
+    def _attach(self):
+        self._fd = self._ser.fileno()
+        self._loop.add_reader(self._fd, self._drain)
+
+    def _detach(self):
+        if self._fd is not None:
+            self._loop.remove_reader(self._fd)
+            self._fd = None
+
+    def _drain(self):
+        """Queue everything buffered on the port (non-blocking, loops until empty —
+        a single READ_SIZE read per tick could fall behind the ~2880 B/s line rate
+        if the fast path ever stopped firing)."""
+        got_data = False
+        try:
+            while chunk := self._ser.read(READ_SIZE):
+                self._queue.put_nowait(chunk)
+                got_data = True
+        except (OSError, serial.SerialException) as exc:
+            # Not per-tick spam-worthy: a dead port stays silent, so the watchdog
+            # reopens it (with a WARNING) after the silence threshold.
+            logger.debug("Serial read error (watchdog will reopen): %s", exc)
+        if got_data:
+            if self._silent_reopens:
+                logger.info("Serial data resumed after %d reopen(s)", self._silent_reopens)
+                self._silent_reopens = 0
+            self._last_rx = time.monotonic()
+
+    async def _poll_loop(self):
+        while True:
+            await asyncio.sleep(SAFETY_POLL_INTERVAL)
+            self._drain()
+            if time.monotonic() - self._last_rx >= SILENCE_REOPEN_INTERVAL:
+                self._reopen()
+
+    def _reopen(self):
+        """Close and reopen the silent port, re-registering the (new) fd."""
+        self._silent_reopens += 1
+        # First reopen at WARNING so a genuine fault is visible; repeats (e.g. the
+        # instruments are simply switched off) drop to DEBUG to keep the journal quiet.
+        level = logging.WARNING if self._silent_reopens == 1 else logging.DEBUG
+        logger.log(level, "No serial data for %.0fs — reopening %s (attempt %d)",
+                   SILENCE_REOPEN_INTERVAL, self._ser.port, self._silent_reopens)
+        self._detach()
+        try:
+            self._ser.close()
+            self._ser.open()
+        except (OSError, serial.SerialException) as exc:
+            logger.error("Reopen of %s failed: %s — retrying in %.0fs",
+                         self._ser.port, exc, SILENCE_REOPEN_INTERVAL)
+            self._last_rx = time.monotonic()   # restart the silence clock, try again
+            return
+        self._attach()
+        self._last_rx = time.monotonic()

@@ -37,6 +37,7 @@ _channel_last_sent: dict = {}
 _device = None
 _priority_override = None
 _last_send_error_log = 0.0
+_last_not_ready_log = 0.0
 _SEND_ERROR_LOG_INTERVAL = 5.0
 
 
@@ -323,7 +324,16 @@ async def process_channel(path):
     if msg is None:
         return
     if _device is None or not _device.ready:
-        return   # not connected / address not claimed — retry on the next update
+        # Not connected / address not claimed — retry on the next update. Never drop
+        # silently: the nmea2000 library's address-claim runs in a background task
+        # that is not retried if it dies, so a bridge stuck not-ready would otherwise
+        # read Fastnet happily while transmitting nothing, with no trace in the logs.
+        global _last_not_ready_log
+        if now - _last_not_ready_log >= _SEND_ERROR_LOG_INTERVAL:
+            logger.warning("Dropping decoded frames: CAN device not ready "
+                           "(address not claimed) — will keep retrying")
+            _last_not_ready_log = now
+        return
     _channel_last_sent[path] = now
     try:
         await _device.send(msg)
