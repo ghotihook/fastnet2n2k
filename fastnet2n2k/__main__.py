@@ -102,10 +102,10 @@ def make_device(args: argparse.Namespace) -> N2KDevice:
 
 
 async def _dispatch_frame(frame: dict) -> None:
-    for channel_name, decoded in frame.get("values", {}).items():
-        update_live_data(channel_name, decoded.get("channel_id"), decoded.get("value"),
-                         decoded.get("display_text"), decoded.get("layout"))
-        await mapping.process_channel(channel_name)
+    # pyfastnet v3 emits {signalk_path: SI_value}.
+    for path, value in frame.get("values", {}).items():
+        update_live_data(path, value)
+        await mapping.process_channel(path)
 
 
 async def _print_live_loop(fb) -> None:

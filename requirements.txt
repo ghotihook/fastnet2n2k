@@ -1,4 +1,4 @@
 nmea2000>=2026.5
 python-can>=4.5
-pyfastnet>=2.0.17
+pyfastnet>=3.0.0
 pyserial>=3.5

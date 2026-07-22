@@ -1,12 +1,10 @@
-"""Latest-value store for decoded Fastnet channels.
+"""Latest-value store for decoded Fastnet data (pyfastnet v3).
 
-Single-threaded: written and read from the main decode loop only. Each entry keeps
-the decoded ``value``, the ``display_text`` and ``layout`` from pyfastnet (the layout
-carries the T/M reference), and a monotonic ``timestamp`` so freshness (age) can be
-reasoned about. Monotonic, not wall-clock: this is written on every channel update and
-only ever read as an elapsed delta, so it must be cheap and immune to clock steps.
-
-Ported from fastnet2ip/core/data_store.py.
+Single-threaded: written and read from the main decode loop only. pyfastnet v3 emits
+``{signalk_path: SI_value}``, so each entry keys a Signal K path to its latest SI
+value plus a monotonic ``timestamp`` for freshness (age). Monotonic, not wall-clock:
+written on every update and only ever read as an elapsed delta, so it must be cheap
+and immune to clock steps.
 """
 
 import time
@@ -14,21 +12,10 @@ import time
 live_data: dict = {}
 
 
-def update_live_data(channel_name, channel_id, value, display_text, layout):
-    live_data[channel_name] = {
-        "channel_id":   channel_id,
-        "value":        value,
-        "display_text": display_text,
-        "layout":       layout,
-        "timestamp":    time.monotonic(),
-    }
+def update_live_data(path, value):
+    live_data[path] = {"value": value, "timestamp": time.monotonic()}
 
 
-def get_live_data(name):
-    entry = live_data.get(name)
+def get_live_data(path):
+    entry = live_data.get(path)
     return entry.get("value") if entry else None
-
-
-def get_live_display(name):
-    entry = live_data.get(name)
-    return entry.get("display_text") if entry else None
