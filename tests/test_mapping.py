@@ -86,7 +86,7 @@ def test_boatspeed_ms_passthrough():
 def test_depth_metres_passthrough():
     msg = mapping.process_depth()
     assert fval(msg, "depth") == pytest.approx(15.2, abs=0.01)
-    assert fval(msg, "offset") == pytest.approx(0.0, abs=0.001)   # below-keel: no further correction
+    assert fval(msg, "offset") is None   # offset "not available": Fastnet doesn't report it
     assert encodes(msg)
 
 

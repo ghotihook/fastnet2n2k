@@ -183,7 +183,7 @@ instruments go quiet the output stops and consumers time the data out.
 | Heading | 127250 | 2 | Magnetic or True per the instrument |
 | Apparent / True wind, TWD | 130306 | 2 | reference per the instrument |
 | Boat speed | 128259 | 2 | |
-| Depth | 128267 | 3 | below **keel**; offset field set to 0 — see note below |
+| Depth | 128267 | 3 | value is below **keel**; offset field sent as not-available — see note below |
 | COG/SOG | 129026 | 2 | prefers True COG, falls back to Magnetic |
 | Attitude (heel/trim) | 127257 | 3 | |
 | Rudder, Leeway, Rate of turn | 127245 / 128000 / 127251 | 2 / 4 / 2 | |
@@ -197,13 +197,20 @@ The **Priority** column is each PGN's NMEA 2000 standard CAN priority (0 = highe
 7 = lowest) — the values used unless you override them all with `--n2k-priority N`.
 
 > **Depth is below keel.** The B&G/H2000 applies its keel offset internally, so the
-> depth on the Fastnet wire is already **below-keel** (Fastnet carries no offset
-> field to signal this, and pyfastnet labels it `belowTransducer` regardless). We
-> emit that value in PGN 128267's depth field with **offset = 0** ("transducer at
-> keel level"), so consumers compute below-keel = depth + offset = the H2000 value,
-> and the explicit zero means "no further correction needed" rather than "offset
-> unknown". **Do not** configure a second keel/transducer offset on any downstream
-> plotter or gateway — it would double-count and read shallow.
+> depth on the Fastnet wire is already **below-keel**. Fastnet never reports the
+> transducer-to-keel distance, so PGN 128267's **offset field is sent as
+> not-available** — the honest encoding for "no offset info" (sending `0` would
+> assert a transducer-at-keel distance we don't actually know). The depth value
+> passes through unchanged either way.
+>
+> Two consequences for consumers:
+> - The reading appears under Signal K `environment.depth.belowTransducer`, because
+>   PGN 128267's depth field *is* below-transducer by definition and `belowKeel` is a
+>   derived path. The **number is your below-keel depth**; only the label differs. To
+>   get a `belowKeel` path, set `transducerToKeel = 0` on the Signal K side and enable
+>   the derived-data plugin.
+> - **Do not** configure a second keel/transducer offset on any downstream plotter or
+>   gateway — it would double-count and read shallow.
 
 Data arrives from pyfastnet 3.0 already in **SI** on Signal K paths, so it maps
 almost 1:1 onto NMEA 2000 — no unit conversion here. **Sign** comes straight from the
