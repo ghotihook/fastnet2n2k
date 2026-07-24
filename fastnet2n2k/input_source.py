@@ -35,8 +35,44 @@ def open_serial_port(device):
     Raises ``serial.SerialException`` (a kind of ``OSError``) if the port won't open.
     """
     logger.info("Serial port: %s", device)
-    return serial.Serial(port=device, baudrate=BAUDRATE, bytesize=BYTE_SIZE,
-                         stopbits=STOP_BITS, parity=PARITY, timeout=0)
+    ser = serial.Serial(port=device, baudrate=BAUDRATE, bytesize=BYTE_SIZE,
+                        stopbits=STOP_BITS, parity=PARITY, timeout=0)
+    _force_baudrate(ser)
+    return ser
+
+
+def _force_baudrate(ser):
+    """Make the kernel actually program the baud rate into the UART.
+
+    Do not remove this, and do not "simplify" it to a single assignment — it looks
+    redundant and is not. Without it, the FIRST open of the port after a boot leaves
+    the hardware running at 9600 while termios cheerfully reports 28800. Roughly two
+    thirds of the bytes are then lost and the rest are garbage, so nothing decodes and
+    the bridge sits there looking healthy while transmitting nothing. Every later open
+    is fine, which is why "just run it a second time" appeared to fix it for months.
+
+    Why it happens: 28800 is not a standard rate on Linux (there is no ``B28800``), so
+    pyserial sets it through the ``BOTHER`` custom-divisor path — ``tcsetattr`` with
+    ``CBAUD = BOTHER``, then the literal rate via a ``TCSETS2`` ioctl. The kernel's
+    ``uart_set_termios()`` skips reprogramming the hardware when nothing "relevant"
+    changed, and "relevant" means the ``c_cflag`` baud bits, not ``c_ispeed`` /
+    ``c_ospeed``. Under ``BOTHER`` those bits are identical either side of the change,
+    so the new speed is optimised away and never reaches the divisor; serial core then
+    falls back to its 9600 default.
+
+    The cure is one genuine ``c_cflag`` change. Bouncing to a *standard* rate and back
+    alters the CBAUD bits twice, so the divisor really is written. Re-assigning 28800
+    on its own does nothing at all — pyserial skips a value that hasn't changed, so
+    there is no ioctl and no reprogramming.
+
+    Measured on a CM4 (``/dev/ttyAMA5``) over six cold boots: without this, the first
+    open runs at 34% of wire speed and decodes nothing; with it, 99.8% and clean.
+    A standard rate such as 38400 is unaffected, which is what pins the cause on the
+    custom-divisor path rather than on the board or the wiring.
+    See ``docs/uart_first_open_baud_fix.md``.
+    """
+    ser.baudrate = 9600        # any standard rate — this is what moves the CBAUD bits
+    ser.baudrate = BAUDRATE    # ...and back, which now actually programs the divisor
 
 
 def load_capture_file(path):

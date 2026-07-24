@@ -6,7 +6,42 @@ message, so the exception *types* are part of the contract, not just the happy p
 
 import pytest
 
-from fastnet2n2k.input_source import READ_SIZE, load_capture_file
+from fastnet2n2k.input_source import (
+    BAUDRATE,
+    READ_SIZE,
+    _force_baudrate,
+    load_capture_file,
+)
+
+
+class _BaudRecorder:
+    """Records every baudrate assignment, like pyserial's property does."""
+
+    def __init__(self):
+        self.assignments = []
+
+    @property
+    def baudrate(self):
+        return self.assignments[-1] if self.assignments else None
+
+    @baudrate.setter
+    def baudrate(self, value):
+        self.assignments.append(value)
+
+
+def test_force_baudrate_makes_a_real_change_then_returns():
+    """The bounce must go via a DIFFERENT rate and end on the right one.
+
+    Collapsing this to a single `ser.baudrate = BAUDRATE` is a silent regression:
+    pyserial skips an unchanged value, so no ioctl happens and the first open after a
+    boot stays at 9600. See _force_baudrate's docstring.
+    """
+    ser = _BaudRecorder()
+    _force_baudrate(ser)
+
+    assert len(ser.assignments) == 2, "must be a bounce, not a single assignment"
+    assert ser.assignments[0] != BAUDRATE, "first step must actually change CBAUD"
+    assert ser.assignments[-1] == BAUDRATE, "must end at the Fastnet line rate"
 
 
 def write(tmp_path, text, name="capture.txt"):
