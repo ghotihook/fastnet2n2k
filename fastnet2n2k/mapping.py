@@ -276,8 +276,10 @@ def process_position():
 
 
 # ── Path → trigger map ────────────────────────────────────────────────────────
-# Every Signal K path that puts a PGN on the bus, and the function that builds it.
-# An update to one of these paths sends its frame; see process_channel below.
+# The keys are Signal-K-style dotted path names — a naming convention pyfastnet emits
+# and we key on; there is no Signal K server or protocol in this pipeline, just the
+# names. Each maps to the function that builds this path's PGN; an update to one of
+# these paths sends its frame. See process_channel below.
 _CHANNEL_MAP = {
     "navigation.headingMagnetic":                   process_heading,
     "navigation.headingTrue":                       process_heading,

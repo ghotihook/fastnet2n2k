@@ -77,6 +77,9 @@ class _QuietTransientCanErrors(logging.Filter):
        text (the record never renders), so ``getMessage()`` raising *is* the signal:
        an unrenderable record is dropped. At INFO these DEBUG records are never
        created, so this half costs nothing in normal operation.
+
+       ``tests/test_upstream_canary.py`` fails when this upstream bug is fixed — at
+       which point case 2 here, and that test, can both be deleted.
     """
 
     _NOISE = ("transmit queue full", "send failed without reconnecting")
