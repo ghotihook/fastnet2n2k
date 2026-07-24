@@ -152,46 +152,52 @@ async def run(args: argparse.Namespace) -> int:
                 args.channel)
     await device.start()
 
-    mapping.set_device(device)
-    if args.n2k_priority is not None:
-        mapping.set_priority_override(args.n2k_priority)
-        logger.info("Overriding priority for all frames: %d", args.n2k_priority)
-    logger.info("Transmitting on %s (src=%d); reading Fastnet from %s",
-                args.channel, device.address, args.serial or args.file)
+    # Everything from here owns a resource (the device, and optionally the serial
+    # port, the dump file and the printer task), so it all lives inside one
+    # try/finally — an error setting any of it up still tears the rest down cleanly.
+    reader = dump = printer = None
     try:
-        await asyncio.wait_for(device.wait_ready(), timeout=10)
-        logger.info("Address claimed: %d", device.address)
-    except asyncio.TimeoutError:
-        logger.warning("Address claim not confirmed within 10s — continuing")
+        mapping.set_device(device)
+        if args.n2k_priority is not None:
+            mapping.set_priority_override(args.n2k_priority)
+            logger.info("Overriding priority for all frames: %d", args.n2k_priority)
+        logger.info("Transmitting on %s (src=%d); reading Fastnet from %s",
+                    args.channel, device.address, args.serial or args.file)
+        try:
+            await asyncio.wait_for(device.wait_ready(), timeout=10)
+            logger.info("Address claimed: %d", device.address)
+        except asyncio.TimeoutError:
+            logger.warning("Address claim not confirmed within 10s — continuing")
 
-    # --serial and --file are mutually exclusive and one is required, so exactly one
-    # of these runs. Either way `source` is where raw Fastnet bytes come from.
-    is_file = args.file is not None
-    try:
-        source = load_capture_file(args.file) if is_file else open_serial_port(args.serial)
-    except (OSError, ValueError) as exc:
-        logger.error("Cannot read Fastnet input: %s", exc)
-        return 1
+        # --serial and --file are mutually exclusive and one is required, so exactly
+        # one of these runs, and one of --dump-serial's parents may not exist — treat
+        # every input/output setup failure the same way: clean message, exit 1 (the
+        # finally still tears the device down).
+        is_file = args.file is not None
+        try:
+            source = (load_capture_file(args.file) if is_file
+                      else open_serial_port(args.serial))
+            if args.dump_serial:
+                # Line-buffered so a capture survives Ctrl-C or a kill. Chunks go out
+                # as hex, the format load_capture_file() reads, so it replays with
+                # --file.
+                dump = open(args.dump_serial, "a", buffering=1)  # noqa: SIM115 — lives for the whole run, closed in finally
+                logger.info("Dumping raw serial to %s", args.dump_serial)
+        except (OSError, ValueError) as exc:
+            logger.error("Cannot open Fastnet input/output: %s", exc)
+            return 1
 
-    fb = FrameBuffer()
-    loop = asyncio.get_running_loop()
+        fb = FrameBuffer()
+        queue: asyncio.Queue = asyncio.Queue()
+        if not is_file:
+            # Live serial is event-driven on the loop (no per-read thread); a file is
+            # paced on the loop directly by the read loop below.
+            reader = SerialReader(asyncio.get_running_loop(), source, queue)
+            reader.start()
 
-    # Live serial is event-driven on the loop (no per-read thread); a file is paced
-    # on the loop directly.
-    reader = None
-    queue: asyncio.Queue = asyncio.Queue()
-    if not is_file:
-        reader = SerialReader(loop, source, queue)
-        reader.start()
+        if args.live_data:
+            printer = asyncio.create_task(_print_live_loop(fb))
 
-    # Line-buffered so a capture survives Ctrl-C or a kill. Chunks go out as hex,
-    # the format load_capture_file() reads, so a dump replays with --file.
-    dump = open(args.dump_serial, "a", buffering=1) if args.dump_serial else None
-    if dump is not None:
-        logger.info("Dumping raw serial to %s", args.dump_serial)
-
-    printer = asyncio.create_task(_print_live_loop(fb)) if args.live_data else None
-    try:
         # The pipeline, one chunk of raw bytes at a time:
         #   read bytes -> FrameBuffer assembles whole Fastnet frames -> each frame's
         #   values go to the live store -> mapping turns them into PGNs and transmits.

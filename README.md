@@ -265,6 +265,15 @@ way if you need it:
 sudo ip link set can1 up type can bitrate 250000 restart-ms 100   # FDCAN2
 ```
 
+### Raspberry Pi built-in UART (`/dev/ttyAMA*`)
+
+On a Pi (including a CM4, which the sample service file targets with `/dev/ttyAMA5`),
+the first open of a built-in PL011 UART after a boot can leave the hardware at 9600
+even though 28800 was requested — Fastnet's rate is non-standard, so it takes the
+kernel's `BOTHER` path, which has a known first-open quirk. `fastnet2n2k` works around
+it automatically (`_force_baudrate` in `input_source.py`); the full diagnosis and the
+supporting measurements are in [`docs/uart_first_open_baud_fix.md`](docs/uart_first_open_baud_fix.md).
+
 ## Tests
 
 ```bash
