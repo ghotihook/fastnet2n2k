@@ -12,8 +12,9 @@ processed PGNs.
 | 65281 | Heading (Raw) | `<H>` headingRaw |
 | 65282 | Boatspeed (Raw) | `<H>` boatspeedRaw |
 
-These are wired into `_CHANNEL_MAP` in `fastnet2n2k/mapping.py` as `"TODO: …
-(deferred)"` sentinels today (so they decode but don't transmit).
+These paths are simply absent from `_CHANNEL_MAP` in `fastnet2n2k/mapping.py`, so
+they decode but don't transmit. (They are not listed in `_SENT_WITH_ANOTHER_PATH`
+either — that dict is only for paths another trigger already covers.)
 
 ### Wire format (must stay byte-identical to fastnet2ip)
 
@@ -38,7 +39,7 @@ is high (see below). Start from `git show 9f3079e` rather than from scratch.
    raw wind / boatspeed ~16 Hz — so transmitting them adds a lot of traffic. Sort
    out the output-rate strategy first (dedupe / lower `MIN_SEND_INTERVAL` /
    decimate the raw PGNs). Note 65280 is a *combined* frame: trigger it from **one**
-   channel and mark the other a sentinel, or it double-fires (one frame per channel).
+   path and list the other in `_SENT_WITH_ANOTHER_PATH`, or it double-fires.
 2. **Integration is ugly.** The `nmea2000` encoder dispatches on
    `encode_pgn_<PGN>` existing in `nmea2000.pgns` and has **no extension API**, so
    the only hook into the correct send pipeline (which gives source-address
@@ -66,9 +67,12 @@ at ~3.5–9 Hz (~70 frames/s total) while the only consumer that matters
 
 Cheap, safe wins when revisited:
 - **Temperature double-fire.** `°C` and `°F` are the same reading in two units and
-  the instruments emit both, so PGN 130312 goes out twice. Make the `°F` channels
-  sentinels (`"duplicate of … (°C)"`) like Depth already does for feet/fathoms.
-  Halves 130312. (`process_sea_temp`/`process_air_temp` already prefer °C.)
+  the instruments emit both, so PGN 130312 can go out twice. **Re-measure before
+  acting** — pyfastnet v3 marks the `°F` channels `collapsed`, projecting them onto
+  the *same* Signal K path as `°C` (as it does for depth in feet/fathoms). There is
+  therefore no separate `°F` path left to exclude, and the fix this item originally
+  proposed no longer applies. Any remaining double-fire would come from the one path
+  updating twice per cycle, which `MIN_SEND_INTERVAL` already caps.
 - **Lower the cap.** `MIN_SEND_INTERVAL` 0.05 → ~0.25 s (4 Hz). That's a 4× margin
   over the 1 Hz sink, keeps every bucket filled (no gaps), and thins the bus with
   one number. **Prefer the cap to dedupe** — dedupe (send-on-change) would punch

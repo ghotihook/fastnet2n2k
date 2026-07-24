@@ -1,8 +1,16 @@
 # v3 Migration Notes — adapting fastnet2n2k to pyfastnet v3
 
 Companion to pyfastnet's `docs/v3_signalk_mapping.md`. Describes what changes in this
-project when pyfastnet moves to its v3 output. **Nothing here is implemented yet** —
-this is the plan. Pin `pyfastnet>=3.0.0` and release the two together.
+project when pyfastnet moves to its v3 output.
+
+> **Status: done.** This was written as a plan; the migration shipped in `e0cc341`
+> (v3.0.0) and the notes are kept as background on *why* the mapping looks the way it
+> does. Read it as history — where it says "current" or "today" it means pre-v3.
+> The predicted collapse of the unit-variant channels did happen: pyfastnet now
+> projects °F, Feet and Fathoms onto the same paths as °C and Meters, so there are no
+> duplicate-unit entries left in `_CHANNEL_MAP`. Paths that a *different* trigger
+> already covers now live in `_SENT_WITH_ANOTHER_PATH` rather than as string
+> sentinels inside `_CHANNEL_MAP`.
 
 ## What changes upstream (pyfastnet v3)
 

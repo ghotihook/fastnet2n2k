@@ -160,7 +160,8 @@ To upgrade later:
 | `--n2k-priority` | per-PGN standard | override CAN priority (0–7, 0 = highest) for **all** transmitted frames; if omitted, each PGN keeps its standard priority (see the PGN table below) |
 | `--unique` | from hostname | device NAME unique number (so two boards don't claim the same NMEA 2000 NAME) |
 | `--live-data` | off | print the live channel table to the console once per second |
-| `--log-level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `--dump-serial PATH` | off | append every received serial chunk as hex, for diagnosing a stream that won't decode. The file replays with `--file` |
+| `--log-level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` (`DEBUG` also turns on pyfastnet's per-frame decode logging) |
 
 The source address is **not** a flag — it is left to the `nmea2000` library, which
 picks a preferred address and resolves conflicts via ISO address claiming, then
@@ -175,8 +176,9 @@ detail.
 ## What it sends
 
 Each Fastnet channel is mapped to the matching PGN and emitted **only when the
-channel updates** (0.05 s minimum interval, 5 s maximum re-broadcast), so when the
-instruments go quiet the output stops and consumers time the data out.
+channel updates**, rate-capped at 0.05 s per path. There is no periodic
+re-broadcast, so when the instruments go quiet the output stops and consumers time
+the data out themselves.
 
 | Data | PGN | Priority | Notes |
 |---|---|---|---|
