@@ -5,6 +5,22 @@
 
 Bring the CAN interface up first:
     sudo ip link set can0 up type can bitrate 250000
+
+Upstream note — the two things ``_QuietTransientCanErrors`` (below) papers over are
+both in the ``nmea2000`` library (tomer-w), and both are worth fixing there rather
+than filtering here forever:
+
+  * ``ioclient.py`` logs a transient, auto-retried "transmit queue full" at WARNING
+    with a full traceback (``exc_info=``). A recoverable, retried condition should be
+    DEBUG or rate-limited, not a per-frame traceback.
+  * ``_seed_network_map`` builds messages from a hard-coded JSON blob whose
+    ``timestamp`` is a *string*. python-can's ``Message.timestamp`` is meant to be a
+    float, so anything that stringifies the resulting ``can.Message`` (its own DEBUG
+    "sending: %s" log does) crashes in ``__str__``. The seed blob should carry a
+    numeric timestamp. This one is arguably python-can's to harden too, but the
+    contract violation is nmea2000's.
+
+If both are fixed upstream, ``_QuietTransientCanErrors`` can be deleted.
 """
 
 import argparse
@@ -31,16 +47,36 @@ logger = logging.getLogger("fastnet2n2k")
 
 
 class _QuietTransientCanErrors(logging.Filter):
-    """Drop per-frame spam when the CAN transmit buffer is full (ENOBUFS): the
-    nmea2000 library retries internally and ``mapping.process_channel`` logs one
-    throttled summary, so the per-attempt warnings (with tracebacks) add only noise.
-    Genuine connection-lost errors are logged at ERROR and pass through.
+    """Suppress two kinds of journal noise that originate below us, in the nmea2000
+    and python-can libraries, not in this bridge. Attached to the *root* handler so it
+    catches records whichever library logger emits them.
 
-    Also drops any record that can't be rendered: at DEBUG, the library's seed
-    messages carry a string timestamp that crashes ``can.Message.__str__``, which
-    would otherwise print a ``--- Logging error ---`` traceback per seed send.
-    Attached to the root handler because the bad record can come from either the
-    nmea2000 or the python-can logger.
+    Neither is our bug, and both would ideally be fixed upstream (see the module note
+    below). Until then this keeps a boat's journal readable. It is deliberately narrow:
+    only the specific noise strings are dropped, and genuine ERRORs pass straight
+    through.
+
+    1. Transmit-queue-full retry spam. When the CAN TX buffer fills (the bus is
+       congested, or nothing is ACKing), nmea2000 logs a WARNING *with a full
+       traceback* on every retry — ``ioclient.py`` "python-can transmit queue full,
+       retrying send". At ~70 frames/s that floods the journal, and it is purely
+       transient: nmea2000 retries internally, and ``mapping.process_channel`` already
+       logs one throttled summary if a send ultimately fails. So the per-attempt
+       copies add nothing. Matched by the substring "transmit queue full".
+
+       "send failed without reconnecting" is a second, defensive phrase: it is not
+       emitted by the currently pinned library versions (verified), but is cheap to
+       keep in case an older python-can within our ``>=4.5`` floor still uses it.
+
+    2. A crash *in logging itself*, only at ``--log-level DEBUG``. nmea2000's network-
+       map seed messages are built from a hard-coded JSON blob whose ``timestamp`` is
+       a string ("2012-06-17T15:02:11"). python-can's contract wants a float, so when
+       its socketcan layer logs ``"sending: %s"`` and ``can.Message.__str__`` formats
+       that timestamp with ``%f``, it raises ``ValueError`` — surfacing as a
+       ``--- Logging error ---`` traceback per seed send. We can't match this one by
+       text (the record never renders), so ``getMessage()`` raising *is* the signal:
+       an unrenderable record is dropped. At INFO these DEBUG records are never
+       created, so this half costs nothing in normal operation.
     """
 
     _NOISE = ("transmit queue full", "send failed without reconnecting")
@@ -48,7 +84,7 @@ class _QuietTransientCanErrors(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             msg = record.getMessage().lower()
-        except Exception:   # unrenderable args (e.g. can.Message with a str timestamp)
+        except Exception:   # case 2: unrenderable record (can.Message w/ str timestamp)
             return False
         return not any(phrase in msg for phrase in self._NOISE)
 
