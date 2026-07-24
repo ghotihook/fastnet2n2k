@@ -54,11 +54,21 @@ class _QuietTransientCanErrors(logging.Filter):
 
 def fnv_unique() -> int:
     """A stable 21-bit unique number derived from the hostname, so two boards don't
-    default to the same NMEA2000 NAME."""
-    h = 2166136261
-    for b in socket.gethostname().encode():
-        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
-    return h & 0x1FFFFF
+    default to the same NMEA2000 NAME.
+
+    This is the standard FNV-1a hash: start from a fixed seed, then for each byte of
+    the hostname XOR it in and multiply by a fixed prime, keeping the result 32-bit.
+    Any hash would do — it just needs to be stable across reboots (so the device
+    keeps its identity on the bus) and unlikely to collide between two boards.
+    The final mask keeps the low 21 bits, which is the field width NMEA2000 allows.
+    """
+    FNV_OFFSET_BASIS = 2166136261
+    FNV_PRIME = 16777619
+
+    h = FNV_OFFSET_BASIS
+    for byte in socket.gethostname().encode():
+        h = ((h ^ byte) * FNV_PRIME) & 0xFFFFFFFF
+    return h & 0x1FFFFF   # 21 bits
 
 
 def parse_args() -> argparse.Namespace:
@@ -118,6 +128,13 @@ async def _print_live_loop(fb) -> None:
 
 
 async def run(args: argparse.Namespace) -> int:
+    """Set up the CAN device and the Fastnet input, then pump one into the other
+    until interrupted (or, for ``--file``, until the capture runs out).
+
+    Startup order matters: the CAN device has to be connected and have claimed an
+    address before there is any point reading Fastnet, because frames decoded before
+    then would have nowhere to go.
+    """
     logger.info("fastnet2n2k %s", __version__)
     try:
         device = make_device(args)
@@ -166,16 +183,18 @@ async def run(args: argparse.Namespace) -> int:
 
     printer = asyncio.create_task(_print_live_loop(fb)) if args.live_data else None
     try:
+        # The pipeline, one chunk of raw bytes at a time:
+        #   read bytes -> FrameBuffer assembles whole Fastnet frames -> each frame's
+        #   values go to the live store -> mapping turns them into PGNs and transmits.
         while True:
             if is_file:
-                await asyncio.sleep(FILE_READ_DELAY)
-                try:
-                    data = next(source)
-                except StopIteration:
+                await asyncio.sleep(FILE_READ_DELAY)   # pace the replay at wire speed
+                data = next(source, None)              # None once the file runs out
+                if data is None:
                     logger.info("File replay complete")
                     break
             else:
-                data = await queue.get()
+                data = await queue.get()   # SerialReader puts bytes here as they arrive
 
             if dump is not None:
                 dump.write(data.hex() + "\n")

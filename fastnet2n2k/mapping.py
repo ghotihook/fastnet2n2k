@@ -43,9 +43,13 @@ _last_warned: dict = {}
 
 def _warn_throttled(key, msg, *args):
     """Warn at most once per ``WARN_INTERVAL`` for ``key``. Both callers fire once
-    per frame while the bus is unhappy, which would flood the journal."""
+    per frame while the bus is unhappy, which would flood the journal.
+
+    ``key`` just names the warning so each kind gets its own timer.
+    """
     now = time.monotonic()
-    if now - _last_warned.get(key, float("-inf")) >= WARN_INTERVAL:
+    last = _last_warned.get(key)
+    if last is None or now - last >= WARN_INTERVAL:
         _last_warned[key] = now
         logger.warning(msg, *args)
 
@@ -69,6 +73,10 @@ def _build(pgn, priority, **fields):
     ``None`` values are written through as "data not available". Source is left 0 so
     the N2KDevice substitutes its claimed address.
     """
+    # The nmea2000 library defines one function per PGN, named decode_pgn_<number>.
+    # Called with an empty payload it hands back a blank message with all of that
+    # PGN's fields present, which we then fill in — so this is "give me a blank
+    # 130306 to fill in", looked up by number because there is no by-number API.
     msg = getattr(pgns, f"decode_pgn_{pgn}")(0, 0)
     msg.source = 0
     msg.priority = _priority_override if _priority_override is not None else priority
@@ -268,6 +276,8 @@ def process_position():
 
 
 # ── Path → trigger map ────────────────────────────────────────────────────────
+# Every Signal K path that puts a PGN on the bus, and the function that builds it.
+# An update to one of these paths sends its frame; see process_channel below.
 _CHANNEL_MAP = {
     "navigation.headingMagnetic":                   process_heading,
     "navigation.headingTrue":                       process_heading,
@@ -275,20 +285,14 @@ _CHANNEL_MAP = {
     "navigation.speedThroughWater":                 process_boatspeed,
     "environment.depth.belowTransducer":            process_depth,
     "environment.wind.angleApparent":               process_apparent_wind,
-    "environment.wind.speedApparent":               "covered by angleApparent (same frame)",
     "environment.wind.angleTrueWater":              process_true_wind,
-    "environment.wind.speedTrue":                   "covered by TWA/TWD (same frame)",
     "environment.wind.directionMagnetic":           process_twd,
     "environment.wind.directionTrue":               process_twd,
     "navigation.leewayAngle":                       process_leeway,
     "navigation.speedOverGround":                   process_cog_sog,
-    "navigation.courseOverGroundTrue":              "covered by speedOverGround (same frame)",
-    "navigation.courseOverGroundMagnetic":          "covered by speedOverGround (same frame)",
     "electrical.batteries.house.voltage":           process_battery,
     "navigation.attitude.roll":                     process_attitude,
-    "navigation.attitude.pitch":                    "covered by attitude.roll (same frame)",
     "navigation.log":                               process_distance_log,
-    "navigation.trip.log":                          "covered by navigation.log (same frame)",
     "environment.water.temperature":                process_sea_temp,
     "environment.outside.temperature":              process_air_temp,
     "navigation.position":                          process_position,
@@ -297,7 +301,24 @@ _CHANNEL_MAP = {
     "navigation.courseGreatCircle.crossTrackError": process_xte,
     "environment.current.setMagnetic":              process_set_drift,
     "environment.current.setTrue":                  process_set_drift,
-    "environment.current.drift":                    "covered by current.set* (same frame)",
+}
+
+# Paths we decode but deliberately do NOT trigger on, because a path in _CHANNEL_MAP
+# already sends the PGN that carries them. Wind speed and wind angle share a single
+# 130306 frame, for instance, so triggering on both would transmit it twice.
+#
+# The point of listing them is to separate "handled elsewhere" from "not transmitted
+# at all". pyfastnet decodes about twenty more standard paths than we map — autopilot,
+# waypoint and performance/racing data — and those are simply absent from both dicts.
+# The text is the reason, shown at DEBUG by trigger_n2k_frame.
+_SENT_WITH_ANOTHER_PATH = {
+    "environment.wind.speedApparent":      "sent with environment.wind.angleApparent",
+    "environment.wind.speedTrue":          "sent with the true-wind angle/direction",
+    "navigation.courseOverGroundTrue":     "sent with navigation.speedOverGround",
+    "navigation.courseOverGroundMagnetic": "sent with navigation.speedOverGround",
+    "navigation.attitude.pitch":           "sent with navigation.attitude.roll",
+    "navigation.trip.log":                 "sent with navigation.log",
+    "environment.current.drift":           "sent with environment.current.set*",
 }
 
 # PGNs this node transmits — advertised to the bus by the N2KDevice.
@@ -308,11 +329,12 @@ TX_PGNS = [127245, 127250, 127251, 127257, 127508, 128000, 128259, 128267,
 def trigger_n2k_frame(path):
     """Build (without sending) the message ``path`` would emit, or None.
     Not on the live send path — used by the tests and handy for debugging."""
-    entry = _CHANNEL_MAP.get(path)
-    if callable(entry):
-        return entry()
-    if isinstance(entry, str):
-        logger.debug("No trigger for %r — %s", path, entry)
+    trigger = _CHANNEL_MAP.get(path)
+    if trigger is not None:
+        return trigger()
+
+    if path in _SENT_WITH_ANOTHER_PATH:
+        logger.debug("No trigger for %r — %s", path, _SENT_WITH_ANOTHER_PATH[path])
     else:
         logger.debug("No trigger for %r", path)
     return None
@@ -321,15 +343,16 @@ def trigger_n2k_frame(path):
 async def process_channel(path):
     """Build and transmit the path's frame on every update, debounced only.
 
-    Paths with no trigger (sentinel-string or unknown entries) are skipped. Every
-    update is sent — a repeated value is still live data worth putting on the bus —
-    subject to MIN_SEND_INTERVAL, which caps any one path's rate (~20 Hz) so a
-    fast-updating path can't flood the bus or CPU. ``_channel_last_sent`` holds the
-    monotonic time of each path's last send.
+    A path we don't transmit on is skipped — either it rides along with another
+    path's frame (_SENT_WITH_ANOTHER_PATH) or we simply don't map it. Every update
+    is sent — a repeated value is still live data worth putting on the bus — subject
+    to MIN_SEND_INTERVAL, which caps any one path's rate (~20 Hz) so a fast-updating
+    path can't flood the bus or CPU. ``_channel_last_sent`` holds the monotonic time
+    of each path's last send.
     """
     trigger = _CHANNEL_MAP.get(path)
-    if not callable(trigger):
-        return   # sentinel-string or unknown path
+    if trigger is None:
+        return
 
     now = time.monotonic()
     last_time = _channel_last_sent.get(path)

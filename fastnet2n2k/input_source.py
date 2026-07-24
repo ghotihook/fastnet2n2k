@@ -86,7 +86,10 @@ class SerialReader:
         port comes back empty so a burst bigger than READ_SIZE is taken in one wakeup
         rather than one chunk per loop iteration."""
         try:
-            while chunk := self._ser.read(READ_SIZE):
+            while True:
+                chunk = self._ser.read(READ_SIZE)
+                if not chunk:
+                    break            # port is empty for now; wait for the next wakeup
                 self._queue.put_nowait(chunk)
         except (OSError, serial.SerialException) as exc:
             # Nothing here can recover a broken fd, and add_reader would keep calling
