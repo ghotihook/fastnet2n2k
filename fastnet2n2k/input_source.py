@@ -24,6 +24,11 @@ FILE_READ_DELAY = READ_SIZE / (BAUDRATE / BITS_PER_BYTE)   # ≈ 0.107 s per 256
 
 logger = logging.getLogger("fastnet2n2k.input")
 
+# Put on the queue when the reader gives up on a dead port, so a consumer parked on
+# ``queue.get()`` wakes instead of blocking forever. The queue otherwise only ever
+# carries ``bytes`` chunks, so this is unambiguous.
+SERIAL_CLOSED = object()
+
 
 def open_serial_port(device):
     """Open the Fastnet serial port: 28800 baud, 8 data bits, odd parity, 2 stop.
@@ -129,8 +134,12 @@ class SerialReader:
                     break            # port is empty for now; wait for the next wakeup
                 self._queue.put_nowait(chunk)
         except (OSError, serial.SerialException) as exc:
-            # Nothing here can recover a broken fd, and add_reader would keep calling
-            # us in a tight loop on it, so stop listening and say so once.
+            # A broken fd can't be recovered here (a dead USB/UART needs the port
+            # reopened from scratch), and add_reader would keep calling us in a tight
+            # loop on it. Stop listening and signal the consumer so it exits rather
+            # than blocking on the queue forever — systemd then restarts us and
+            # reopens the port (which also re-applies the baud fix). Say so once.
             logger.error("Serial read failed on %s: %s — no longer reading",
                          self._ser.port, exc)
             self.stop()
+            self._queue.put_nowait(SERIAL_CLOSED)

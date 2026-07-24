@@ -6,11 +6,15 @@ bits: the log filter (fragile, and load-bearing when the bus misbehaves), the NA
 hash (a stability contract), and the one argument that has a validation rule.
 """
 
+import asyncio
 import logging
+import types
 
 import pytest
 
+from fastnet2n2k import __main__ as main_mod
 from fastnet2n2k.__main__ import _QuietTransientCanErrors, fnv_unique, parse_args
+from fastnet2n2k.input_source import SERIAL_CLOSED
 
 
 # ── _QuietTransientCanErrors ──────────────────────────────────────────────────
@@ -81,3 +85,42 @@ def test_serial_and_file_are_mutually_exclusive(monkeypatch):
     monkeypatch.setattr("sys.argv", ["fastnet2n2k", "--serial", "/dev/x", "--file", "cap.txt"])
     with pytest.raises(SystemExit):
         parse_args()
+
+
+# ── run() fault tolerance (F1) ────────────────────────────────────────────────
+# The headline fix: a dead serial port must make run() EXIT so systemd restarts it,
+# never leave it parked on queue.get() forever. A regression here is a silent hang
+# that no test would otherwise catch — so this drives the real run() wiring, and the
+# wait_for timeout turns a hang into a failure instead of a stuck test run.
+
+class _FakeDevice:
+    address = 100
+    ready = True
+
+    async def start(self): pass
+    async def wait_ready(self): pass
+    async def close(self): pass
+
+
+def test_run_exits_when_the_serial_port_dies(monkeypatch):
+    class _DyingReader:
+        def __init__(self, _loop, _ser, queue):
+            self._queue = queue
+
+        def start(self):
+            self._queue.put_nowait(SERIAL_CLOSED)   # port died before any data
+
+        def stop(self): pass
+
+    monkeypatch.setattr(main_mod, "make_device", lambda args: _FakeDevice())
+    monkeypatch.setattr(main_mod, "open_serial_port", lambda dev: object())
+    monkeypatch.setattr(main_mod, "SerialReader", _DyingReader)
+
+    args = types.SimpleNamespace(channel="can0", n2k_priority=None, serial="/dev/x",
+                                 file=None, live_data=False, unique=1)
+    logging.disable(logging.CRITICAL)
+    try:
+        rc = asyncio.run(asyncio.wait_for(main_mod.run(args), timeout=2))
+    finally:
+        logging.disable(logging.NOTSET)
+    assert rc == 1   # exited (and, thanks to wait_for, provably did not hang)

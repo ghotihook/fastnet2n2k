@@ -33,12 +33,26 @@ logger = logging.getLogger("fastnet2n2k.mapping")
 
 MIN_SEND_INTERVAL = 0.05    # per-path rate cap (~20 Hz); debounce only
 
+# How long the device may stay not-ready *while we have frames to send* before we give
+# up and exit. Normal address claim completes in a few seconds (wait_ready waits 10),
+# so a value well past that means the nmea2000 background claim task has probably died
+# — it is never retried if it does — and reconnecting from a fresh process is the only
+# way back. Comfortably above the normal claim time so a healthy startup never trips it.
+NOT_READY_EXIT_AFTER = 30.0
+
 _channel_last_sent: dict = {}
 _device = None
 _priority_override = None
+_not_ready_since = None      # monotonic time we first saw the device not-ready, or None
 
 WARN_INTERVAL = 5.0         # per-key cap on the warnings below
 _last_warned: dict = {}
+
+
+class DeviceNotReadyError(RuntimeError):
+    """The CAN device stayed not-ready for NOT_READY_EXIT_AFTER while frames were
+    waiting to send. Raised so run() can exit cleanly and let systemd restart us,
+    rather than reading Fastnet forever and transmitting nothing."""
 
 
 def _warn_throttled(key, msg, *args):
@@ -368,14 +382,23 @@ async def process_channel(path):
         return
     if msg is None:
         return
+    global _not_ready_since
     if _device is None or not _device.ready:
-        # Not connected / address not claimed — retry on the next update. Never drop
-        # silently: the nmea2000 library's address-claim runs in a background task
-        # that is not retried if it dies, so a bridge stuck not-ready would otherwise
-        # read Fastnet happily while transmitting nothing, with no trace in the logs.
+        # Not connected / address not claimed. Retry on the next update — a claim in
+        # progress, or a bus that is briefly down, recovers on its own. But if it
+        # never recovers, don't read Fastnet forever transmitting nothing: after
+        # NOT_READY_EXIT_AFTER of continuous not-ready-with-data, give up so systemd
+        # restarts us (the nmea2000 claim task is not retried if it dies).
+        if _not_ready_since is None:
+            _not_ready_since = now
+        elif now - _not_ready_since >= NOT_READY_EXIT_AFTER:
+            raise DeviceNotReadyError(
+                f"CAN device not ready for {NOT_READY_EXIT_AFTER:.0f}s while frames "
+                f"were waiting — address claim has likely failed")
         _warn_throttled("not_ready", "Dropping decoded frames: CAN device not ready "
                                      "(address not claimed) — will keep retrying")
         return
+    _not_ready_since = None   # ready again — reset the clock
     _channel_last_sent[path] = now
     try:
         await _device.send(msg)

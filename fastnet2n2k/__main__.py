@@ -37,6 +37,7 @@ from . import __version__, mapping
 from .display import print_live_data
 from .input_source import (
     FILE_READ_DELAY,
+    SERIAL_CLOSED,
     SerialReader,
     load_capture_file,
     open_serial_port,
@@ -239,11 +240,25 @@ async def run(args: argparse.Namespace) -> int:
                     break
             else:
                 data = await queue.get()   # SerialReader puts bytes here as they arrive
+                if data is SERIAL_CLOSED:
+                    # The serial port died and can't be recovered in place. Exit so
+                    # systemd restarts us and reopens it (see SerialReader._drain).
+                    logger.error("Serial input failed — exiting to be restarted")
+                    return 1
 
-            fb.add_to_buffer(data)
-            fb.get_complete_frames()
-            while not fb.frame_queue.empty():
-                await _dispatch_frame(fb.frame_queue.get())
+            # One bad chunk must not take the bridge down — decode/dispatch errors are
+            # logged and skipped. DeviceNotReadyError is deliberate (F2) and passes
+            # through to exit; process_channel already guards per-value/per-send faults.
+            try:
+                fb.add_to_buffer(data)
+                fb.get_complete_frames()
+                while not fb.frame_queue.empty():
+                    await _dispatch_frame(fb.frame_queue.get())
+            except mapping.DeviceNotReadyError as exc:
+                logger.error("%s — exiting to be restarted", exc)
+                return 1
+            except Exception as exc:   # noqa: BLE001 — keep running past bad input
+                logger.warning("Dropping undecodable input (%s) — continuing", exc)
     finally:
         if printer is not None:
             printer.cancel()

@@ -8,7 +8,7 @@ the reader instead of spinning on it.
 
 import asyncio
 
-from fastnet2n2k.input_source import READ_SIZE, SerialReader
+from fastnet2n2k.input_source import READ_SIZE, SERIAL_CLOSED, SerialReader
 
 
 class FakePort:
@@ -87,3 +87,14 @@ def test_read_failure_stops_the_reader_rather_than_spinning():
 
     assert reader._loop.readers == set()
     assert port.closed
+
+
+def test_read_failure_signals_the_consumer_instead_of_a_silent_hang():
+    """F1: a dead port must wake a consumer parked on queue.get(), not leave it
+    blocked forever. _drain enqueues SERIAL_CLOSED so run() can exit and be restarted."""
+    port = FakePort(fail=OSError("device went away"))
+    reader = make_reader(port)
+
+    reader._drain()
+
+    assert reader._queue.get_nowait() is SERIAL_CLOSED
