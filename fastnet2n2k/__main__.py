@@ -150,9 +150,8 @@ async def run(args: argparse.Namespace) -> int:
     fb = FrameBuffer()
     loop = asyncio.get_running_loop()
 
-    # Live serial is event-driven on the loop (no per-read thread); SerialReader also
-    # runs a safety poll and a silence watchdog that reopens the port when no bytes
-    # arrive — see input_source.py for why. A file is paced on the loop directly.
+    # Live serial is event-driven on the loop (no per-read thread); a file is paced
+    # on the loop directly.
     reader = None
     queue: asyncio.Queue = asyncio.Queue()
     if not is_file:
@@ -183,14 +182,12 @@ async def run(args: argparse.Namespace) -> int:
             fb.add_to_buffer(data)
             fb.get_complete_frames()
             while not fb.frame_queue.empty():
-                if reader is not None:
-                    reader.note_frame()   # feeds the no-frame reopen watchdog
                 await _dispatch_frame(fb.frame_queue.get())
     finally:
         if printer is not None:
             printer.cancel()
         if reader is not None:
-            await reader.stop()   # cancels the poll task, detaches the fd, closes the port
+            reader.stop()   # detaches the fd, closes the port
         if dump is not None:
             dump.close()
         await device.close()

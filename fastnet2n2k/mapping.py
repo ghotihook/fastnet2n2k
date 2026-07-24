@@ -36,9 +36,18 @@ MIN_SEND_INTERVAL = 0.05    # per-path rate cap (~20 Hz); debounce only
 _channel_last_sent: dict = {}
 _device = None
 _priority_override = None
-_last_send_error_log = 0.0
-_last_not_ready_log = 0.0
-_SEND_ERROR_LOG_INTERVAL = 5.0
+
+WARN_INTERVAL = 5.0         # per-key cap on the warnings below
+_last_warned: dict = {}
+
+
+def _warn_throttled(key, msg, *args):
+    """Warn at most once per ``WARN_INTERVAL`` for ``key``. Both callers fire once
+    per frame while the bus is unhappy, which would flood the journal."""
+    now = time.monotonic()
+    if now - _last_warned.get(key, float("-inf")) >= WARN_INTERVAL:
+        _last_warned[key] = now
+        logger.warning(msg, *args)
 
 
 def set_device(device) -> None:
@@ -339,21 +348,15 @@ async def process_channel(path):
         # silently: the nmea2000 library's address-claim runs in a background task
         # that is not retried if it dies, so a bridge stuck not-ready would otherwise
         # read Fastnet happily while transmitting nothing, with no trace in the logs.
-        global _last_not_ready_log
-        if now - _last_not_ready_log >= _SEND_ERROR_LOG_INTERVAL:
-            logger.warning("Dropping decoded frames: CAN device not ready "
-                           "(address not claimed) — will keep retrying")
-            _last_not_ready_log = now
+        _warn_throttled("not_ready", "Dropping decoded frames: CAN device not ready "
+                                     "(address not claimed) — will keep retrying")
         return
     _channel_last_sent[path] = now
     try:
         await _device.send(msg)
     except Exception as exc:   # noqa: BLE001 — bus-off / interface drop / reconnect
         # The N2KDevice client reconnects underneath; don't let a transient CAN
-        # failure tear down the bridge. Log at most once per interval to avoid
-        # flooding while the bus is down.
-        global _last_send_error_log
-        if now - _last_send_error_log >= _SEND_ERROR_LOG_INTERVAL:
-            logger.warning("CAN send failed (%s) — continuing; the device will reconnect",
-                           exc)
-            _last_send_error_log = now
+        # failure tear down the bridge.
+        _warn_throttled("send_failed",
+                        "CAN send failed (%s) — continuing; the device will reconnect",
+                        exc)
