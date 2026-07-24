@@ -86,9 +86,6 @@ def parse_args() -> argparse.Namespace:
                    help="Device NAME unique number (default: derived from hostname)")
     p.add_argument("--live-data", action="store_true",
                    help="Print the live channel table to the console once per second")
-    p.add_argument("--dump-serial", metavar="PATH",
-                   help="Append every received serial chunk as hex, for diagnosing a "
-                        "stream that won't decode. The file replays with --file.")
     p.add_argument("--log-level", default="INFO",
                    choices=("DEBUG", "INFO", "WARNING", "ERROR"),
                    help="Logging verbosity (default: INFO)")
@@ -153,9 +150,9 @@ async def run(args: argparse.Namespace) -> int:
     await device.start()
 
     # Everything from here owns a resource (the device, and optionally the serial
-    # port, the dump file and the printer task), so it all lives inside one
-    # try/finally — an error setting any of it up still tears the rest down cleanly.
-    reader = dump = printer = None
+    # port and the printer task), so it all lives inside one try/finally — an error
+    # setting any of it up still tears the rest down cleanly.
+    reader = printer = None
     try:
         mapping.set_device(device)
         if args.n2k_priority is not None:
@@ -170,21 +167,14 @@ async def run(args: argparse.Namespace) -> int:
             logger.warning("Address claim not confirmed within 10s — continuing")
 
         # --serial and --file are mutually exclusive and one is required, so exactly
-        # one of these runs, and one of --dump-serial's parents may not exist — treat
-        # every input/output setup failure the same way: clean message, exit 1 (the
-        # finally still tears the device down).
+        # one of these runs. A failure to open either is a clean message and exit 1
+        # (the finally still tears the device down).
         is_file = args.file is not None
         try:
             source = (load_capture_file(args.file) if is_file
                       else open_serial_port(args.serial))
-            if args.dump_serial:
-                # Line-buffered so a capture survives Ctrl-C or a kill. Chunks go out
-                # as hex, the format load_capture_file() reads, so it replays with
-                # --file.
-                dump = open(args.dump_serial, "a", buffering=1)  # noqa: SIM115 — lives for the whole run, closed in finally
-                logger.info("Dumping raw serial to %s", args.dump_serial)
         except (OSError, ValueError) as exc:
-            logger.error("Cannot open Fastnet input/output: %s", exc)
+            logger.error("Cannot open Fastnet input: %s", exc)
             return 1
 
         fb = FrameBuffer()
@@ -211,8 +201,6 @@ async def run(args: argparse.Namespace) -> int:
             else:
                 data = await queue.get()   # SerialReader puts bytes here as they arrive
 
-            if dump is not None:
-                dump.write(data.hex() + "\n")
             fb.add_to_buffer(data)
             fb.get_complete_frames()
             while not fb.frame_queue.empty():
@@ -222,8 +210,6 @@ async def run(args: argparse.Namespace) -> int:
             printer.cancel()
         if reader is not None:
             reader.stop()   # detaches the fd, closes the port
-        if dump is not None:
-            dump.close()
         await device.close()
     return 0
 
