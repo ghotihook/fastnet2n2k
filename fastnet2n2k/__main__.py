@@ -75,6 +75,9 @@ def parse_args() -> argparse.Namespace:
                    help="Device NAME unique number (default: derived from hostname)")
     p.add_argument("--live-data", action="store_true",
                    help="Print the live channel table to the console once per second")
+    p.add_argument("--dump-serial", metavar="PATH",
+                   help="Append every received serial chunk as hex, for diagnosing a "
+                        "stream that won't decode. The file replays with --file.")
     p.add_argument("--log-level", default="INFO",
                    choices=("DEBUG", "INFO", "WARNING", "ERROR"),
                    help="Logging verbosity (default: INFO)")
@@ -156,6 +159,12 @@ async def run(args: argparse.Namespace) -> int:
         reader = SerialReader(loop, source, queue)
         reader.start()
 
+    # Line-buffered so a capture survives Ctrl-C or a kill. Chunks go out as hex,
+    # the format initialize_input_source() reads, so a dump replays with --file.
+    dump = open(args.dump_serial, "a", buffering=1) if args.dump_serial else None
+    if dump is not None:
+        logger.info("Dumping raw serial to %s", args.dump_serial)
+
     printer = asyncio.create_task(_print_live_loop(fb)) if args.live_data else None
     try:
         while True:
@@ -169,6 +178,8 @@ async def run(args: argparse.Namespace) -> int:
             else:
                 data = await queue.get()
 
+            if dump is not None:
+                dump.write(data.hex() + "\n")
             fb.add_to_buffer(data)
             fb.get_complete_frames()
             while not fb.frame_queue.empty():
@@ -180,6 +191,8 @@ async def run(args: argparse.Namespace) -> int:
             printer.cancel()
         if reader is not None:
             await reader.stop()   # cancels the poll task, detaches the fd, closes the port
+        if dump is not None:
+            dump.close()
         await device.close()
     return 0
 
@@ -191,6 +204,13 @@ def main() -> int:
         level=level, format="%(asctime)s [%(name)s] %(levelname)-5s %(message)s")
     # The nmea2000 client is chatty at DEBUG; keep it in step with our level.
     logging.getLogger("nmea2000").setLevel(level)
+    # pyfastnet pins its own logger to INFO and attaches its own handler, so its
+    # per-frame BUF / FRAME discard / QUEUE lines were unreachable from the CLI —
+    # exactly the evidence needed when a stream arrives but won't decode. Drop the
+    # library handler so its records come through ours, formatted and filtered.
+    _pyfastnet = logging.getLogger("pyfastnet")
+    _pyfastnet.handlers.clear()
+    _pyfastnet.setLevel(level)
     # Drop transmit-buffer-full spam (we summarise that ourselves) and any record that
     # can't be rendered — e.g. python-can stringifying a seed message with a string
     # timestamp. Attached to the root handler so it covers every logger, not just

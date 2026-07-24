@@ -10,6 +10,8 @@ import time
 
 import serial
 
+from . import line_settings
+
 BAUDRATE        = 28800
 BYTE_SIZE       = serial.EIGHTBITS
 STOP_BITS       = serial.STOPBITS_TWO
@@ -30,10 +32,12 @@ def initialize_input_source(serial_port=None, file_path=None):
     if serial_port:
         logger.info("Serial port: %s", serial_port)
         try:
-            return serial.Serial(
+            ser = serial.Serial(
                 port=serial_port, baudrate=BAUDRATE, bytesize=BYTE_SIZE,
                 stopbits=STOP_BITS, parity=PARITY, timeout=0,
-            ), False
+            )
+            report_line_settings(ser, "opened")
+            return ser, False
         except (serial.SerialException, OSError) as e:
             logger.error("Cannot open %s: %s", serial_port, e)
             raise SystemExit(1)
@@ -53,6 +57,18 @@ def initialize_input_source(serial_port=None, file_path=None):
     else:
         logger.error("Specify a serial port or a file")
         raise SystemExit(1)
+
+
+def report_line_settings(ser, when):
+    """Log what the kernel actually applied to the port, and shout if it differs from
+    what we asked for. A port that comes up mis-set — wrong divisor or parity —
+    delivers bytes that can never checksum into a frame, which is indistinguishable
+    from a healthy port until you look at the tty itself."""
+    logger.info("%s %s: %s", ser.port, when, line_settings.describe(ser))
+    wrong = line_settings.mismatch(
+        ser, BAUDRATE, 8, PARITY == serial.PARITY_ODD, 2)
+    if wrong:
+        logger.warning("%s line settings are NOT what was requested: %s", ser.port, wrong)
 
 
 # Safety-net poll rate. The add_reader fast path handles reads with ~zero latency when
@@ -187,6 +203,7 @@ class SerialReader:
                          self._ser.port, exc, SILENCE_REOPEN_INTERVAL)
             self._reset_clocks()   # try again after the interval, not on the next tick
             return
+        report_line_settings(self._ser, "after reopen %d" % self._reopens)
         self._attach()
         self._reset_clocks()
 
