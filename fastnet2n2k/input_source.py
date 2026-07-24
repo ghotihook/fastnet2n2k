@@ -25,35 +25,36 @@ FILE_READ_DELAY = READ_SIZE / (BAUDRATE / BITS_PER_BYTE)   # ≈ 0.107 s per 256
 logger = logging.getLogger("fastnet2n2k.input")
 
 
-def initialize_input_source(serial_port=None, file_path=None):
-    """Return ``(source, is_file)``. ``source`` is a ``serial.Serial`` for a live
-    port, or an iterator of byte chunks for a file."""
-    if serial_port:
-        logger.info("Serial port: %s", serial_port)
-        try:
-            return serial.Serial(
-                port=serial_port, baudrate=BAUDRATE, bytesize=BYTE_SIZE,
-                stopbits=STOP_BITS, parity=PARITY, timeout=0,
-            ), False
-        except (serial.SerialException, OSError) as e:
-            logger.error("Cannot open %s: %s", serial_port, e)
-            raise SystemExit(1)
-    elif file_path:
-        logger.info("File: %s", file_path)
-        try:
-            with open(file_path) as f:
-                hex_data = f.read().strip().replace(" ", "").replace("\n", "")
-            if not hex_data:
-                raise ValueError("File is empty")
-            binary = bytes.fromhex(hex_data)
-        except (OSError, ValueError) as e:
-            logger.error("File error: %s", e)
-            raise SystemExit(1)
-        chunks = [binary[i:i + READ_SIZE] for i in range(0, len(binary), READ_SIZE)]
-        return iter(chunks), True
-    else:
-        logger.error("Specify a serial port or a file")
-        raise SystemExit(1)
+def open_serial_port(device):
+    """Open the Fastnet serial port: 28800 baud, 8 data bits, odd parity, 2 stop.
+
+    ``timeout=0`` makes reads non-blocking — ``read()`` returns whatever is buffered
+    right now, or empty, and never waits. That is what lets SerialReader run on the
+    event loop without holding it up.
+
+    Raises ``serial.SerialException`` (a kind of ``OSError``) if the port won't open.
+    """
+    logger.info("Serial port: %s", device)
+    return serial.Serial(port=device, baudrate=BAUDRATE, bytesize=BYTE_SIZE,
+                         stopbits=STOP_BITS, parity=PARITY, timeout=0)
+
+
+def load_capture_file(path):
+    """Read a hex capture from disk and return it as an iterator of byte chunks.
+
+    The file is hex text — spaces and newlines are ignored, so a capture written one
+    frame per line works as-is. Chunking it to READ_SIZE makes a replay arrive in the
+    same size pieces a real port delivers.
+
+    Raises ``OSError`` if the file can't be read, or ``ValueError`` if it isn't hex.
+    """
+    logger.info("File: %s", path)
+    with open(path) as f:
+        hex_data = f.read().strip().replace(" ", "").replace("\n", "")
+    if not hex_data:
+        raise ValueError("File is empty")
+    binary = bytes.fromhex(hex_data)
+    return iter([binary[i:i + READ_SIZE] for i in range(0, len(binary), READ_SIZE)])
 
 
 class SerialReader:

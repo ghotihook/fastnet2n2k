@@ -22,7 +22,8 @@ from .display import print_live_data
 from .input_source import (
     FILE_READ_DELAY,
     SerialReader,
-    initialize_input_source,
+    load_capture_file,
+    open_serial_port,
 )
 from .live_store import update_live_data
 
@@ -163,7 +164,15 @@ async def run(args: argparse.Namespace) -> int:
     except asyncio.TimeoutError:
         logger.warning("Address claim not confirmed within 10s — continuing")
 
-    source, is_file = initialize_input_source(serial_port=args.serial, file_path=args.file)
+    # --serial and --file are mutually exclusive and one is required, so exactly one
+    # of these runs. Either way `source` is where raw Fastnet bytes come from.
+    is_file = args.file is not None
+    try:
+        source = load_capture_file(args.file) if is_file else open_serial_port(args.serial)
+    except (OSError, ValueError) as exc:
+        logger.error("Cannot read Fastnet input: %s", exc)
+        return 1
+
     fb = FrameBuffer()
     loop = asyncio.get_running_loop()
 
@@ -176,7 +185,7 @@ async def run(args: argparse.Namespace) -> int:
         reader.start()
 
     # Line-buffered so a capture survives Ctrl-C or a kill. Chunks go out as hex,
-    # the format initialize_input_source() reads, so a dump replays with --file.
+    # the format load_capture_file() reads, so a dump replays with --file.
     dump = open(args.dump_serial, "a", buffering=1) if args.dump_serial else None
     if dump is not None:
         logger.info("Dumping raw serial to %s", args.dump_serial)
