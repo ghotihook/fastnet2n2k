@@ -172,6 +172,8 @@ async def run(args: argparse.Namespace) -> int:
             fb.add_to_buffer(data)
             fb.get_complete_frames()
             while not fb.frame_queue.empty():
+                if reader is not None:
+                    reader.note_frame()   # feeds the no-frame reopen watchdog
                 await _dispatch_frame(fb.frame_queue.get())
     finally:
         if printer is not None:

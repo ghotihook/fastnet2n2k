@@ -69,6 +69,15 @@ SAFETY_POLL_INTERVAL = 0.1
 # fix for the "works only on the second run" bug; polling alone cannot cure it.)
 SILENCE_REOPEN_INTERVAL = 5.0
 
+# Second reopen trigger: bytes arriving that never decode. A misconfigured port (wrong
+# divisor or parity — 28800 is not a standard baud, so pyserial sets it through the
+# BOTHER/TCSETS2 custom-divisor path) delivers a continuous stream the frame decoder
+# can never checksum, which the silence watchdog cannot see because the port is not
+# silent. Fastnet broadcast frames arrive many times a second, so a gap this long with
+# bytes still flowing means the stream is undecodable. Longer than
+# SILENCE_REOPEN_INTERVAL so a genuinely dead port trips the more specific path first.
+NO_FRAME_REOPEN_INTERVAL = 10.0
+
 
 class SerialReader:
     """Drive a live serial port and keep it alive.
@@ -78,9 +87,11 @@ class SerialReader:
 
     - ``add_reader`` fast path: the fd wakes the loop the moment bytes arrive.
     - 10 Hz safety poll: drains the port even if the readable notification is missed.
-    - Silence watchdog: if no bytes arrive for ``SILENCE_REOPEN_INTERVAL``, close and
-      reopen the port. This is the actual cure for the first-boot dead-RX UART; the
-      first two mechanisms cannot read bytes that never reach the fd.
+    - Reopen watchdog: close and reopen the port when it stops making progress —
+      either no bytes at all for ``SILENCE_REOPEN_INTERVAL``, or bytes that never
+      decode into a frame for ``NO_FRAME_REOPEN_INTERVAL``. Both are first-boot
+      failure modes of the Pi UART that no amount of polling can cure; the reopen
+      automates the "stop it and run it again" workaround.
     """
 
     def __init__(self, loop, ser, queue):
@@ -89,8 +100,10 @@ class SerialReader:
         self._queue = queue
         self._fd = None
         self._poll_task = None
-        self._last_rx = time.monotonic()
-        self._silent_reopens = 0
+        now = time.monotonic()
+        self._last_rx = now
+        self._last_frame = now
+        self._reopens = 0
 
     def start(self):
         """Attach the fd to the loop and start the poll/watchdog task."""
@@ -117,6 +130,18 @@ class SerialReader:
             self._loop.remove_reader(self._fd)
             self._fd = None
 
+    def note_frame(self):
+        """Called by the read loop for every decoded frame.
+
+        A decoded frame is the only proof the port is genuinely working: bytes alone
+        only show it is electrically alive, and a misconfigured port delivers plenty
+        of those. So this both feeds the no-frame watchdog and reports recovery.
+        """
+        self._last_frame = time.monotonic()
+        if self._reopens:
+            logger.info("Serial data decoding again after %d reopen(s)", self._reopens)
+            self._reopens = 0
+
     def _drain(self):
         """Queue everything buffered on the port (non-blocking, loops until empty —
         a single READ_SIZE read per tick could fall behind the ~2880 B/s line rate
@@ -131,26 +156,28 @@ class SerialReader:
             # reopens it (with a WARNING) after the silence threshold.
             logger.debug("Serial read error (watchdog will reopen): %s", exc)
         if got_data:
-            if self._silent_reopens:
-                logger.info("Serial data resumed after %d reopen(s)", self._silent_reopens)
-                self._silent_reopens = 0
             self._last_rx = time.monotonic()
 
     async def _poll_loop(self):
         while True:
             await asyncio.sleep(SAFETY_POLL_INTERVAL)
             self._drain()
-            if time.monotonic() - self._last_rx >= SILENCE_REOPEN_INTERVAL:
-                self._reopen()
+            now = time.monotonic()
+            if now - self._last_rx >= SILENCE_REOPEN_INTERVAL:
+                self._reopen("no data for %.0fs" % SILENCE_REOPEN_INTERVAL)
+            elif now - self._last_frame >= NO_FRAME_REOPEN_INTERVAL:
+                self._reopen("data arriving but nothing decodable for %.0fs"
+                             % NO_FRAME_REOPEN_INTERVAL)
 
-    def _reopen(self):
-        """Close and reopen the silent port, re-registering the (new) fd."""
-        self._silent_reopens += 1
+    def _reopen(self, reason):
+        """Close and reopen a port that has stopped making progress, re-registering
+        the (new) fd. ``reason`` names which watchdog tripped."""
+        self._reopens += 1
         # First reopen at WARNING so a genuine fault is visible; repeats (e.g. the
         # instruments are simply switched off) drop to DEBUG to keep the journal quiet.
-        level = logging.WARNING if self._silent_reopens == 1 else logging.DEBUG
-        logger.log(level, "No serial data for %.0fs — reopening %s (attempt %d)",
-                   SILENCE_REOPEN_INTERVAL, self._ser.port, self._silent_reopens)
+        level = logging.WARNING if self._reopens == 1 else logging.DEBUG
+        logger.log(level, "Reopening %s — %s (attempt %d)",
+                   self._ser.port, reason, self._reopens)
         self._detach()
         try:
             self._ser.close()
@@ -158,7 +185,14 @@ class SerialReader:
         except (OSError, serial.SerialException) as exc:
             logger.error("Reopen of %s failed: %s — retrying in %.0fs",
                          self._ser.port, exc, SILENCE_REOPEN_INTERVAL)
-            self._last_rx = time.monotonic()   # restart the silence clock, try again
+            self._reset_clocks()   # try again after the interval, not on the next tick
             return
         self._attach()
-        self._last_rx = time.monotonic()
+        self._reset_clocks()
+
+    def _reset_clocks(self):
+        """Restart both watchdog clocks. Both, always — leaving the no-frame clock
+        stale after a silence reopen would trip it again on the very next tick."""
+        now = time.monotonic()
+        self._last_rx = now
+        self._last_frame = now
