@@ -158,9 +158,29 @@ To upgrade later:
 | `--serial DEV` / `--file PATH` | — | input source (one is required) |
 | `--channel` | `can0` | SocketCAN interface |
 | `--n2k-priority` | per-PGN standard | override CAN priority (0–7, 0 = highest) for **all** transmitted frames; if omitted, each PGN keeps its standard priority (see the PGN table below) |
+| `--ignore-pgn PGN` | nothing suppressed | don't transmit this PGN (and don't advertise it); repeatable and/or comma-separated — see below |
 | `--unique` | from hostname | device NAME unique number (so two boards don't claim the same NMEA 2000 NAME) |
 | `--live-data` | off | print the live channel table to the console once per second |
 | `--log-level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` (`DEBUG` also turns on pyfastnet's per-frame decode logging) |
+
+### Suppressing PGNs
+
+If another device on the bus is the authority for some data — a GPS for position and
+COG/SOG, say — stop this bridge sending its version of it:
+
+```bash
+python -m fastnet2n2k --serial /dev/ttyUSB0 --ignore-pgn 129025,129026
+python -m fastnet2n2k --serial /dev/ttyUSB0 --ignore-pgn 129025 --ignore-pgn 129026
+```
+
+A suppressed PGN is never built and never sent, and is also dropped from the
+transmit-PGN list this node advertises to the bus, so it doesn't claim to send what
+it won't. Only PGNs from the table below are accepted; anything else is a startup
+error rather than a silent no-op, so a typo can't look like it worked.
+
+Suppression is per **PGN**, and two PGNs carry more than one kind of data:
+`--ignore-pgn 130306` silences apparent wind, true wind *and* TWD, and
+`--ignore-pgn 130312` silences both sea *and* air temperature.
 
 The source address is **not** a flag — it is left to the `nmea2000` library, which
 picks a preferred address and resolves conflicts via ISO address claiming, then

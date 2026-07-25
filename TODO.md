@@ -53,8 +53,9 @@ is high (see below). Start from `git show 9f3079e` rather than from scratch.
 Isolate the whole adapter in its own `fastnet2n2k/proprietary.py`: own the frame
 layout (header, packing, priority) in one place, expose `build_*` handlers and a
 single explicit `register()` call (invoked from `__main__`, not as an import side
-effect), so `mapping.py` stays declarative. Remember to add the PGNs back to
-`TX_PGNS`.
+effect), so `mapping.py` stays declarative. Tag each re-added trigger with
+`@emits(<pgn>)` — `TX_PGNS` and `--ignore-pgn` are both derived from that tag, so
+there is no separate list to update.
 
 ## Deferred: output rate / cadence
 
