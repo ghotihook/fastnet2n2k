@@ -18,7 +18,6 @@ def print_live_data(fb):
     print(hdr)
     print("-" * len(hdr))
     for path, data in sorted(live_data.items()):
-        ts = data.get("timestamp")
-        age = f"{now - ts:.1f}" if ts is not None else ""
-        print(f"{str(path):<52} {str(data.get('value')):<26} {age:<8}")
+        age = f"{now - data['timestamp']:.1f}"
+        print(f"{str(path):<52} {str(data['value']):<26} {age:<8}")
     print(f"Buffer: {fb.get_buffer_size()}\n")

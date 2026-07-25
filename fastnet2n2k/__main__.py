@@ -5,6 +5,22 @@
 
 Bring the CAN interface up first:
     sudo ip link set can0 up type can bitrate 250000
+
+Upstream note — the two things ``_QuietTransientCanErrors`` (below) papers over are
+both in the ``nmea2000`` library (tomer-w), and both are worth fixing there rather
+than filtering here forever:
+
+  * ``ioclient.py`` logs a transient, auto-retried "transmit queue full" at WARNING
+    with a full traceback (``exc_info=``). A recoverable, retried condition should be
+    DEBUG or rate-limited, not a per-frame traceback.
+  * ``_seed_network_map`` builds messages from a hard-coded JSON blob whose
+    ``timestamp`` is a *string*. python-can's ``Message.timestamp`` is meant to be a
+    float, so anything that stringifies the resulting ``can.Message`` (its own DEBUG
+    "sending: %s" log does) crashes in ``__str__``. The seed blob should carry a
+    numeric timestamp. This one is arguably python-can's to harden too, but the
+    contract violation is nmea2000's.
+
+If both are fixed upstream, ``_QuietTransientCanErrors`` can be deleted.
 """
 
 import argparse
@@ -21,8 +37,10 @@ from . import __version__, mapping
 from .display import print_live_data
 from .input_source import (
     FILE_READ_DELAY,
+    SERIAL_CLOSED,
     SerialReader,
-    initialize_input_source,
+    load_capture_file,
+    open_serial_port,
 )
 from .live_store import update_live_data
 
@@ -30,16 +48,39 @@ logger = logging.getLogger("fastnet2n2k")
 
 
 class _QuietTransientCanErrors(logging.Filter):
-    """Drop per-frame spam when the CAN transmit buffer is full (ENOBUFS): the
-    nmea2000 library retries internally and ``mapping.process_channel`` logs one
-    throttled summary, so the per-attempt warnings (with tracebacks) add only noise.
-    Genuine connection-lost errors are logged at ERROR and pass through.
+    """Suppress two kinds of journal noise that originate below us, in the nmea2000
+    and python-can libraries, not in this bridge. Attached to the *root* handler so it
+    catches records whichever library logger emits them.
 
-    Also drops any record that can't be rendered: at DEBUG, the library's seed
-    messages carry a string timestamp that crashes ``can.Message.__str__``, which
-    would otherwise print a ``--- Logging error ---`` traceback per seed send.
-    Attached to the root handler because the bad record can come from either the
-    nmea2000 or the python-can logger.
+    Neither is our bug, and both would ideally be fixed upstream (see the module note
+    below). Until then this keeps a boat's journal readable. It is deliberately narrow:
+    only the specific noise strings are dropped, and genuine ERRORs pass straight
+    through.
+
+    1. Transmit-queue-full retry spam. When the CAN TX buffer fills (the bus is
+       congested, or nothing is ACKing), nmea2000 logs a WARNING *with a full
+       traceback* on every retry — ``ioclient.py`` "python-can transmit queue full,
+       retrying send". At ~70 frames/s that floods the journal, and it is purely
+       transient: nmea2000 retries internally, and ``mapping.process_channel`` already
+       logs one throttled summary if a send ultimately fails. So the per-attempt
+       copies add nothing. Matched by the substring "transmit queue full".
+
+       "send failed without reconnecting" is a second, defensive phrase: it is not
+       emitted by the currently pinned library versions (verified), but is cheap to
+       keep in case an older python-can within our ``>=4.5`` floor still uses it.
+
+    2. A crash *in logging itself*, only at ``--log-level DEBUG``. nmea2000's network-
+       map seed messages are built from a hard-coded JSON blob whose ``timestamp`` is
+       a string ("2012-06-17T15:02:11"). python-can's contract wants a float, so when
+       its socketcan layer logs ``"sending: %s"`` and ``can.Message.__str__`` formats
+       that timestamp with ``%f``, it raises ``ValueError`` — surfacing as a
+       ``--- Logging error ---`` traceback per seed send. We can't match this one by
+       text (the record never renders), so ``getMessage()`` raising *is* the signal:
+       an unrenderable record is dropped. At INFO these DEBUG records are never
+       created, so this half costs nothing in normal operation.
+
+       ``tests/test_upstream_canary.py`` fails when this upstream bug is fixed — at
+       which point case 2 here, and that test, can both be deleted.
     """
 
     _NOISE = ("transmit queue full", "send failed without reconnecting")
@@ -47,18 +88,28 @@ class _QuietTransientCanErrors(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             msg = record.getMessage().lower()
-        except Exception:   # unrenderable args (e.g. can.Message with a str timestamp)
+        except Exception:   # case 2: unrenderable record (can.Message w/ str timestamp)
             return False
         return not any(phrase in msg for phrase in self._NOISE)
 
 
 def fnv_unique() -> int:
     """A stable 21-bit unique number derived from the hostname, so two boards don't
-    default to the same NMEA2000 NAME."""
-    h = 2166136261
-    for b in socket.gethostname().encode():
-        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
-    return h & 0x1FFFFF
+    default to the same NMEA2000 NAME.
+
+    This is the standard FNV-1a hash: start from a fixed seed, then for each byte of
+    the hostname XOR it in and multiply by a fixed prime, keeping the result 32-bit.
+    Any hash would do — it just needs to be stable across reboots (so the device
+    keeps its identity on the bus) and unlikely to collide between two boards.
+    The final mask keeps the low 21 bits, which is the field width NMEA2000 allows.
+    """
+    FNV_OFFSET_BASIS = 2166136261
+    FNV_PRIME = 16777619
+
+    h = FNV_OFFSET_BASIS
+    for byte in socket.gethostname().encode():
+        h = ((h ^ byte) * FNV_PRIME) & 0xFFFFFFFF
+    return h & 0x1FFFFF   # 21 bits
 
 
 def parse_args() -> argparse.Namespace:
@@ -115,6 +166,13 @@ async def _print_live_loop(fb) -> None:
 
 
 async def run(args: argparse.Namespace) -> int:
+    """Set up the CAN device and the Fastnet input, then pump one into the other
+    until interrupted (or, for ``--file``, until the capture runs out).
+
+    Startup order matters: the CAN device has to be connected and have claimed an
+    address before there is any point reading Fastnet, because frames decoded before
+    then would have nowhere to go.
+    """
     logger.info("fastnet2n2k %s", __version__)
     try:
         device = make_device(args)
@@ -131,55 +189,81 @@ async def run(args: argparse.Namespace) -> int:
                 args.channel)
     await device.start()
 
-    mapping.set_device(device)
-    if args.n2k_priority is not None:
-        mapping.set_priority_override(args.n2k_priority)
-        logger.info("Overriding priority for all frames: %d", args.n2k_priority)
-    logger.info("Transmitting on %s (src=%d); reading Fastnet from %s",
-                args.channel, device.address, args.serial or args.file)
+    # Everything from here owns a resource (the device, and optionally the serial
+    # port and the printer task), so it all lives inside one try/finally — an error
+    # setting any of it up still tears the rest down cleanly.
+    reader = printer = None
     try:
-        await asyncio.wait_for(device.wait_ready(), timeout=10)
-        logger.info("Address claimed: %d", device.address)
-    except asyncio.TimeoutError:
-        logger.warning("Address claim not confirmed within 10s — continuing")
+        mapping.set_device(device)
+        if args.n2k_priority is not None:
+            mapping.set_priority_override(args.n2k_priority)
+            logger.info("Overriding priority for all frames: %d", args.n2k_priority)
+        logger.info("Transmitting on %s (src=%d); reading Fastnet from %s",
+                    args.channel, device.address, args.serial or args.file)
+        try:
+            await asyncio.wait_for(device.wait_ready(), timeout=10)
+            logger.info("Address claimed: %d", device.address)
+        except asyncio.TimeoutError:
+            logger.warning("Address claim not confirmed within 10s — continuing")
 
-    source, is_file = initialize_input_source(serial_port=args.serial, file_path=args.file)
-    fb = FrameBuffer()
-    loop = asyncio.get_running_loop()
+        # --serial and --file are mutually exclusive and one is required, so exactly
+        # one of these runs. A failure to open either is a clean message and exit 1
+        # (the finally still tears the device down).
+        is_file = args.file is not None
+        try:
+            source = (load_capture_file(args.file) if is_file
+                      else open_serial_port(args.serial))
+        except (OSError, ValueError) as exc:
+            logger.error("Cannot open Fastnet input: %s", exc)
+            return 1
 
-    # Live serial is event-driven on the loop (no per-read thread); SerialReader also
-    # runs a safety poll and a silence watchdog that reopens the port when no bytes
-    # arrive — see input_source.py for why. A file is paced on the loop directly.
-    reader = None
-    queue: asyncio.Queue = asyncio.Queue()
-    if not is_file:
-        reader = SerialReader(loop, source, queue)
-        reader.start()
+        fb = FrameBuffer()
+        queue: asyncio.Queue = asyncio.Queue()
+        if not is_file:
+            # Live serial is event-driven on the loop (no per-read thread); a file is
+            # paced on the loop directly by the read loop below.
+            reader = SerialReader(asyncio.get_running_loop(), source, queue)
+            reader.start()
 
-    printer = asyncio.create_task(_print_live_loop(fb)) if args.live_data else None
-    try:
+        if args.live_data:
+            printer = asyncio.create_task(_print_live_loop(fb))
+
+        # The pipeline, one chunk of raw bytes at a time:
+        #   read bytes -> FrameBuffer assembles whole Fastnet frames -> each frame's
+        #   values go to the live store -> mapping turns them into PGNs and transmits.
         while True:
             if is_file:
-                await asyncio.sleep(FILE_READ_DELAY)
-                try:
-                    data = next(source)
-                except StopIteration:
+                await asyncio.sleep(FILE_READ_DELAY)   # pace the replay at wire speed
+                data = next(source, None)              # None once the file runs out
+                if data is None:
                     logger.info("File replay complete")
                     break
             else:
-                data = await queue.get()
+                data = await queue.get()   # SerialReader puts bytes here as they arrive
+                if data is SERIAL_CLOSED:
+                    # The serial port died and can't be recovered in place. Exit so
+                    # systemd restarts us and reopens it (see SerialReader._drain).
+                    logger.error("Serial input failed — exiting to be restarted")
+                    return 1
 
-            fb.add_to_buffer(data)
-            fb.get_complete_frames()
-            while not fb.frame_queue.empty():
-                if reader is not None:
-                    reader.note_frame()   # feeds the no-frame reopen watchdog
-                await _dispatch_frame(fb.frame_queue.get())
+            # One bad chunk must not take the bridge down — decode/dispatch errors are
+            # logged and skipped. DeviceNotReadyError is deliberate (F2) and passes
+            # through to exit; process_channel already guards per-value/per-send faults.
+            try:
+                fb.add_to_buffer(data)
+                fb.get_complete_frames()
+                while not fb.frame_queue.empty():
+                    await _dispatch_frame(fb.frame_queue.get())
+            except mapping.DeviceNotReadyError as exc:
+                logger.error("%s — exiting to be restarted", exc)
+                return 1
+            except Exception as exc:   # noqa: BLE001 — keep running past bad input
+                logger.warning("Dropping undecodable input (%s) — continuing", exc)
     finally:
         if printer is not None:
             printer.cancel()
         if reader is not None:
-            await reader.stop()   # cancels the poll task, detaches the fd, closes the port
+            reader.stop()   # detaches the fd, closes the port
         await device.close()
     return 0
 
@@ -191,6 +275,13 @@ def main() -> int:
         level=level, format="%(asctime)s [%(name)s] %(levelname)-5s %(message)s")
     # The nmea2000 client is chatty at DEBUG; keep it in step with our level.
     logging.getLogger("nmea2000").setLevel(level)
+    # pyfastnet pins its own logger to INFO and attaches its own handler, so its
+    # per-frame BUF / FRAME discard / QUEUE lines were unreachable from the CLI —
+    # exactly the evidence needed when a stream arrives but won't decode. Drop the
+    # library handler so its records come through ours, formatted and filtered.
+    _pyfastnet = logging.getLogger("pyfastnet")
+    _pyfastnet.handlers.clear()
+    _pyfastnet.setLevel(level)
     # Drop transmit-buffer-full spam (we summarise that ourselves) and any record that
     # can't be rendered — e.g. python-can stringifying a seed message with a string
     # timestamp. Attached to the root handler so it covers every logger, not just

@@ -18,4 +18,4 @@ def update_live_data(path, value):
 
 def get_live_data(path):
     entry = live_data.get(path)
-    return entry.get("value") if entry else None
+    return entry["value"] if entry else None

@@ -178,3 +178,50 @@ def test_build_error_is_isolated(monkeypatch):
     update_live_data("environment.depth.belowTransducer", 15.2)
     asyncio.run(mapping.process_channel("environment.depth.belowTransducer"))   # must not raise
     assert dev.sent == []
+
+
+class _NotReadyDevice(_StubDevice):
+    ready = False
+
+
+def _process_depth_once():
+    update_live_data("environment.depth.belowTransducer", 15.2)
+    asyncio.run(mapping.process_channel("environment.depth.belowTransducer"))
+
+
+def test_not_ready_is_tolerated_then_exits(monkeypatch):
+    """F2: a not-ready device is tolerated (dropped, not raised) up to
+    NOT_READY_EXIT_AFTER, then raises DeviceNotReadyError so run() can restart us."""
+    mapping.set_device(_NotReadyDevice())
+    mapping._channel_last_sent.clear()
+    mapping._not_ready_since = None
+    clock = [1000.0]
+    monkeypatch.setattr(mapping.time, "monotonic", lambda: clock[0])
+
+    _process_depth_once()                       # first not-ready: starts the clock
+    clock[0] += mapping.NOT_READY_EXIT_AFTER - 1
+    _process_depth_once()                       # still within grace: tolerated
+
+    clock[0] += 2                               # now past the threshold
+    with pytest.raises(mapping.DeviceNotReadyError):
+        _process_depth_once()
+
+
+def test_not_ready_clock_resets_when_the_device_recovers(monkeypatch):
+    """A brief not-ready blip must not count toward the exit once the device is back."""
+    dev = _NotReadyDevice()
+    mapping.set_device(dev)
+    mapping._channel_last_sent.clear()
+    mapping._not_ready_since = None
+    clock = [1000.0]
+    monkeypatch.setattr(mapping.time, "monotonic", lambda: clock[0])
+
+    _process_depth_once()                       # not-ready: clock starts
+    dev.ready = True
+    clock[0] += 1
+    _process_depth_once()                       # recovered → clock reset
+    assert mapping._not_ready_since is None
+
+    dev.ready = False
+    clock[0] += mapping.NOT_READY_EXIT_AFTER - 1
+    _process_depth_once()                       # fresh grace window, no raise

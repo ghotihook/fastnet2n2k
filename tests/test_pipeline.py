@@ -19,9 +19,7 @@ _ENC = NMEA2000Encoder(N2KFormat.CAN_FRAME_ASCII)
 def test_full_capture_emits_expected_pgns():
     load_capture("example1_fastnet_data.txt")
     pgns = set()
-    for channel_name, entry in mapping._CHANNEL_MAP.items():
-        if not callable(entry):
-            continue
+    for channel_name in mapping._CHANNEL_MAP:
         msg = mapping.trigger_n2k_frame(channel_name)
         if msg is None:
             continue
