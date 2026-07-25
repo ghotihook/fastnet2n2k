@@ -1,5 +1,53 @@
 # TODO
 
+## Blocked on a capture: waypoint navigation PGN 129284 (+ 129301)
+
+pyfastnet decodes active-leg waypoint data that we don't transmit at all. Confirmed
+present on the boat (live table, 2026-07-25, pyfastnet 3.1.0) — earlier work assumed
+it was unavailable because **none of the captures in `tests/data/` contain any
+waypoint paths** (they were all recorded with no active nav leg). That is the only
+thing blocking this.
+
+### 129284 Navigation Data — field → source path
+
+| Field | Source path | Seen live? |
+|---|---|---|
+| `distanceToWaypoint` | `navigation.courseGreatCircle.nextPoint.distance` | yes (2963.2 m) |
+| `bearingPositionToDestinationWaypoint` | `nextPoint.bearingTrue` / `bearingMagnetic` | yes (5.4454 rad) |
+| `courseBearingReference` | from which bearing path is present | yes (True) |
+| `bearingOriginToDestinationWaypoint` | `courseGreatCircle.bearingTrackTrue` / `bearingTrackMagnetic` | not yet |
+| `etaTime`, `etaDate` | derive from `nextPoint.timeToGo` | not yet |
+| `waypointClosingVelocity` | `nextPoint.velocityMadeGood` | not yet |
+| origin/destination WP numbers, destination lat/lon | — | **never**: Fastnet has no waypoint identity |
+
+The "not yet" paths exist in the decoder but weren't on the wire in that snapshot
+(nav-mode / active-page dependent). Send them as not-available when absent, like the
+existing triggers do — no special casing needed.
+
+**Trap:** `performance.velocityMadeGood` is VMG *to windward*, a different quantity
+from `waypointClosingVelocity`. The only correct source is
+`courseGreatCircle.nextPoint.velocityMadeGood`. Don't substitute one for the other.
+
+### What's out of reach, and what that costs
+
+`129285` (Route/WP Information), `129302` (Bearing/Distance between Marks) and the
+`130064`–`130074` Route & WP Service family all need waypoint names/IDs or a waypoint
+database, which Fastnet never provides. That matters for consumers: Yacht Devices
+document that `129284` carries only numeric waypoint identifiers, and that gateways
+need `129285` alongside it to synthesise NMEA 0183 RMB/APB. So expect distance and
+bearing to be usable while some MFDs decline to populate a "navigate to" page.
+`129283` XTE is already transmitted and rides alongside.
+
+`129301` (Time to+from Mark) needs `nextPoint.timeToGo`; its `markId` would be
+not-available for the same reason. Cheap to add once that path is observed.
+
+### Next step
+
+Capture Fastnet hex **while navigating to a mark**, nav page up so `timeToGo` and
+`bearingTrack*` are in the stream, into `tests/data/`. Then add the trigger(s) tagged
+`@emits(129284)` and assert against the capture. Writing it before that means
+shipping a PGN nothing has ever verified.
+
 ## Deferred: B&G proprietary raw PGNs 65280 / 65281 / 65282
 
 Emit the raw (unfiltered) instrument channels as B&G manufacturer-proprietary
