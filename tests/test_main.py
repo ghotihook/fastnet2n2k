@@ -87,6 +87,37 @@ def test_serial_and_file_are_mutually_exclusive(monkeypatch):
         parse_args()
 
 
+# ── --ignore-pgn parsing ──────────────────────────────────────────────────────
+# Repeatable and comma-separated both have to work: a systemd unit line reads better
+# comma-separated, an interactive invocation often repeats the flag.
+
+def _args(*extra, monkeypatch):
+    monkeypatch.setattr("sys.argv", ["fastnet2n2k", "--serial", "/dev/x", *extra])
+    return parse_args()
+
+
+def test_ignore_pgn_defaults_to_nothing_suppressed(monkeypatch):
+    assert _args(monkeypatch=monkeypatch).ignore_pgn == frozenset()
+
+
+def test_ignore_pgn_accepts_repeated_and_comma_separated(monkeypatch):
+    args = _args("--ignore-pgn", "130312,128275", "--ignore-pgn", "127251",
+                 monkeypatch=monkeypatch)
+    assert args.ignore_pgn == {130312, 128275, 127251}
+
+
+def test_ignore_pgn_rejects_a_pgn_we_do_not_transmit(monkeypatch):
+    """A typo must fail loudly — silently ignoring it would look like it worked
+    while the frames kept flowing."""
+    with pytest.raises(SystemExit):
+        _args("--ignore-pgn", "130316", monkeypatch=monkeypatch)
+
+
+def test_ignore_pgn_rejects_non_numeric(monkeypatch):
+    with pytest.raises(SystemExit):
+        _args("--ignore-pgn", "depth", monkeypatch=monkeypatch)
+
+
 # ── run() fault tolerance (F1) ────────────────────────────────────────────────
 # The headline fix: a dead serial port must make run() EXIT so systemd restarts it,
 # never leave it parked on queue.get() forever. A regression here is a silent hang
@@ -117,7 +148,8 @@ def test_run_exits_when_the_serial_port_dies(monkeypatch):
     monkeypatch.setattr(main_mod, "SerialReader", _DyingReader)
 
     args = types.SimpleNamespace(channel="can0", n2k_priority=None, serial="/dev/x",
-                                 file=None, live_data=False, unique=1)
+                                 file=None, live_data=False, unique=1,
+                                 ignore_pgn=frozenset())
     logging.disable(logging.CRITICAL)
     try:
         rc = asyncio.run(asyncio.wait_for(main_mod.run(args), timeout=2))

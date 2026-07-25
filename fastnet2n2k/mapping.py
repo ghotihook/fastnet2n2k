@@ -43,6 +43,7 @@ NOT_READY_EXIT_AFTER = 30.0
 _channel_last_sent: dict = {}
 _device = None
 _priority_override = None
+_ignored_pgns: frozenset = frozenset()   # --ignore-pgn: never built, sent or advertised
 _not_ready_since = None      # monotonic time we first saw the device not-ready, or None
 
 WARN_INTERVAL = 5.0         # per-key cap on the warnings below
@@ -79,6 +80,28 @@ def set_priority_override(priority) -> None:
     standard priorities. ``None`` restores the standard per-PGN behaviour."""
     global _priority_override
     _priority_override = priority
+
+
+def set_ignored_pgns(pgns_) -> None:
+    """Suppress these PGNs: paths whose trigger emits one are skipped before the
+    message is ever built, and ``tx_pgns()`` drops them from what we advertise.
+    An empty iterable restores normal behaviour (everything transmitted)."""
+    global _ignored_pgns
+    _ignored_pgns = frozenset(pgns_)
+
+
+def emits(pgn):
+    """Tag a trigger with the PGN it builds.
+
+    One declaration serves three readers: ``--ignore-pgn`` suppression (which needs
+    to know a path's PGN *before* calling the trigger, so a suppressed path costs
+    nothing), the advertised ``TX_PGNS`` list, and anyone reading the code. Keeping
+    them derived from the same tag means they cannot drift apart.
+    """
+    def tag(fn):
+        fn.pgn = pgn
+        return fn
+    return tag
 
 
 def _build(pgn, priority, **fields):
@@ -119,16 +142,19 @@ def _wind(angle_path, speed_path, reference):
     return _build(130306, 2, windSpeed=speed, windAngle=_wrap(angle), reference=reference)
 
 
+@emits(130306)
 def process_apparent_wind():
     return _wind("environment.wind.angleApparent",
                  "environment.wind.speedApparent", "Apparent")
 
 
+@emits(130306)
 def process_true_wind():
     return _wind("environment.wind.angleTrueWater",
                  "environment.wind.speedTrue", "True (boat referenced)")
 
 
+@emits(130306)
 def process_twd():
     mag = get_live_data("environment.wind.directionMagnetic")
     tru = get_live_data("environment.wind.directionTrue")
@@ -142,6 +168,7 @@ def process_twd():
     return _build(130306, 2, windSpeed=speed, windAngle=_wrap(direction), reference=ref)
 
 
+@emits(127250)
 def process_heading():
     mag = get_live_data("navigation.headingMagnetic")
     tru = get_live_data("navigation.headingTrue")
@@ -155,6 +182,7 @@ def process_heading():
                   deviation=None, variation=None)
 
 
+@emits(128259)
 def process_boatspeed():
     bs = get_live_data("navigation.speedThroughWater")   # m/s
     if bs is None:
@@ -163,6 +191,7 @@ def process_boatspeed():
                   speedGroundReferenced=None, speedDirection=None)
 
 
+@emits(128267)
 def process_depth():
     # The H2000 applies its keel offset internally, so the number on the Fastnet
     # wire is already depth-below-keel (despite pyfastnet's belowTransducer label).
@@ -178,6 +207,7 @@ def process_depth():
     return _build(128267, 3, depth=dm, offset=None, range=None)
 
 
+@emits(127245)
 def process_rudder():
     ra = get_live_data("steering.rudderAngle")   # rad
     if ra is None:
@@ -185,6 +215,7 @@ def process_rudder():
     return _build(127245, 2, instance=0, position=ra, angleOrder=None)
 
 
+@emits(128000)
 def process_leeway():
     lw = get_live_data("navigation.leewayAngle")   # rad
     if lw is None:
@@ -192,6 +223,7 @@ def process_leeway():
     return _build(128000, 4, leewayAngle=lw)
 
 
+@emits(129026)
 def process_cog_sog():
     cog_true = get_live_data("navigation.courseOverGroundTrue")
     cog_mag = get_live_data("navigation.courseOverGroundMagnetic")
@@ -205,6 +237,7 @@ def process_cog_sog():
     return _build(129026, 2, cog=None, sog=sog)
 
 
+@emits(127508)
 def process_battery():
     v = get_live_data("electrical.batteries.house.voltage")
     if v is None:
@@ -212,6 +245,7 @@ def process_battery():
     return _build(127508, 6, instance=0, voltage=v, current=None, temperature=None)
 
 
+@emits(127257)
 def process_attitude():
     roll = get_live_data("navigation.attitude.roll")     # rad
     pitch = get_live_data("navigation.attitude.pitch")   # rad
@@ -220,6 +254,7 @@ def process_attitude():
     return _build(127257, 3, yaw=None, pitch=pitch, roll=roll)
 
 
+@emits(130314)
 def process_pressure():
     bp = get_live_data("environment.outside.pressure")   # Pa
     if bp is None:
@@ -227,6 +262,7 @@ def process_pressure():
     return _build(130314, 5, instance=0, source="Atmospheric", pressure=bp)
 
 
+@emits(130312)
 def process_sea_temp():
     k = get_live_data("environment.water.temperature")   # Kelvin
     if k is None:
@@ -235,6 +271,7 @@ def process_sea_temp():
                   actualTemperature=k, setTemperature=None)
 
 
+@emits(130312)
 def process_air_temp():
     k = get_live_data("environment.outside.temperature")   # Kelvin
     if k is None:
@@ -243,6 +280,7 @@ def process_air_temp():
                   actualTemperature=k, setTemperature=None)
 
 
+@emits(128275)
 def process_distance_log():
     stored = get_live_data("navigation.log")        # m
     trip = get_live_data("navigation.trip.log")     # m
@@ -254,6 +292,7 @@ def process_distance_log():
                   tripLog=int(trip) if trip is not None else None)
 
 
+@emits(129283)
 def process_xte():
     xte = get_live_data("navigation.courseGreatCircle.crossTrackError")   # m
     if xte is None:
@@ -261,6 +300,7 @@ def process_xte():
     return _build(129283, 3, xteMode="Autonomous", navigationTerminated="No", xte=xte)
 
 
+@emits(127251)
 def process_rate_of_turn():
     yr = get_live_data("navigation.rateOfTurn")   # rad/s
     if yr is None:
@@ -268,6 +308,7 @@ def process_rate_of_turn():
     return _build(127251, 2, rate=yr)
 
 
+@emits(129291)
 def process_set_drift():
     set_mag = get_live_data("environment.current.setMagnetic")
     set_tru = get_live_data("environment.current.setTrue")
@@ -282,6 +323,7 @@ def process_set_drift():
                   drift=max(0.0, drift) if drift is not None else None)
 
 
+@emits(129025)
 def process_position():
     pos = get_live_data("navigation.position")   # {"latitude", "longitude"} degrees
     if not pos:
@@ -337,14 +379,23 @@ _SENT_WITH_ANOTHER_PATH = {
     "environment.current.drift":           "sent with environment.current.set*",
 }
 
-# PGNs this node transmits — advertised to the bus by the N2KDevice.
-TX_PGNS = [127245, 127250, 127251, 127257, 127508, 128000, 128259, 128267,
-           128275, 129025, 129026, 129283, 129291, 130306, 130312, 130314]
+# PGNs this node can transmit, derived from the @emits tags so adding or retiring a
+# trigger can't leave a stale hand-written list behind. Use tx_pgns() for what we
+# actually advertise — that subtracts anything suppressed with --ignore-pgn.
+TX_PGNS = sorted({trigger.pgn for trigger in _CHANNEL_MAP.values()})
+
+
+def tx_pgns() -> list:
+    """The PGNs to advertise to the bus: everything we can transmit, minus the ones
+    suppressed by --ignore-pgn. Don't claim to transmit what we will never send."""
+    return [pgn for pgn in TX_PGNS if pgn not in _ignored_pgns]
 
 
 def trigger_n2k_frame(path):
     """Build (without sending) the message ``path`` would emit, or None.
-    Not on the live send path — used by the tests and handy for debugging."""
+    Not on the live send path — used by the tests and handy for debugging.
+    Deliberately ignores --ignore-pgn: this answers "what would this path build?",
+    which stays useful while diagnosing a PGN you have suppressed."""
     trigger = _CHANNEL_MAP.get(path)
     if trigger is not None:
         return trigger()
@@ -360,14 +411,16 @@ async def process_channel(path):
     """Build and transmit the path's frame on every update, debounced only.
 
     A path we don't transmit on is skipped — either it rides along with another
-    path's frame (_SENT_WITH_ANOTHER_PATH) or we simply don't map it. Every update
+    path's frame (_SENT_WITH_ANOTHER_PATH), we simply don't map it, or its PGN was
+    suppressed with --ignore-pgn (checked from the @emits tag before building, so a
+    suppressed path costs nothing per update). Every update
     is sent — a repeated value is still live data worth putting on the bus — subject
     to MIN_SEND_INTERVAL, which caps any one path's rate (~20 Hz) so a fast-updating
     path can't flood the bus or CPU. ``_channel_last_sent`` holds the monotonic time
     of each path's last send.
     """
     trigger = _CHANNEL_MAP.get(path)
-    if trigger is None:
+    if trigger is None or trigger.pgn in _ignored_pgns:
         return
 
     now = time.monotonic()

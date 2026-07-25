@@ -28,6 +28,7 @@ _ENC = NMEA2000Encoder(N2KFormat.CAN_FRAME_ASCII)
 def load_capture(name):
     live_data.clear()
     mapping._channel_last_sent.clear()
+    mapping.set_ignored_pgns(())   # module state: don't leak suppression between tests
     with open(os.path.join(CAPTURES, name)) as f:
         data = bytes.fromhex(f.read().strip().replace(" ", "").replace("\n", ""))
     fb = FrameBuffer()   # v3: queues {signalk_path: SI_value}
@@ -169,6 +170,7 @@ def test_no_send_when_trigger_returns_none():
 
 def test_build_error_is_isolated(monkeypatch):
     # A handler that raises must not crash the bridge or send anything.
+    @mapping.emits(128267)
     def boom():
         raise ValueError("bad value")
     monkeypatch.setitem(mapping._CHANNEL_MAP, "environment.depth.belowTransducer", boom)
@@ -178,6 +180,54 @@ def test_build_error_is_isolated(monkeypatch):
     update_live_data("environment.depth.belowTransducer", 15.2)
     asyncio.run(mapping.process_channel("environment.depth.belowTransducer"))   # must not raise
     assert dev.sent == []
+
+
+# ── --ignore-pgn suppression ──────────────────────────────────────────────────
+
+def test_suppressed_pgn_is_not_sent():
+    dev = _StubDevice()
+    mapping.set_device(dev)
+    mapping.set_ignored_pgns({128267})           # depth
+    update_live_data("environment.depth.belowTransducer", 15.2)
+    update_live_data("navigation.speedThroughWater", 3.0)
+    asyncio.run(mapping.process_channel("environment.depth.belowTransducer"))
+    asyncio.run(mapping.process_channel("navigation.speedThroughWater"))
+    assert [msg.PGN for msg in dev.sent] == [128259]   # boatspeed unaffected
+
+
+def test_suppressing_a_shared_pgn_silences_every_path_on_it():
+    """130306 carries apparent wind, true wind and TWD — suppressing it drops all
+    three. Documented behaviour, not a bug: --ignore-pgn works at PGN granularity."""
+    dev = _StubDevice()
+    mapping.set_device(dev)
+    mapping.set_ignored_pgns({130306})
+    for path in ("environment.wind.angleApparent", "environment.wind.angleTrueWater",
+                 "environment.wind.directionMagnetic"):
+        asyncio.run(mapping.process_channel(path))
+    assert dev.sent == []
+
+
+def test_suppressed_pgns_are_not_advertised():
+    mapping.set_ignored_pgns({130306, 128267})
+    advertised = mapping.tx_pgns()
+    assert 130306 not in advertised and 128267 not in advertised
+    assert set(advertised) == set(mapping.TX_PGNS) - {130306, 128267}
+
+
+def test_every_trigger_declares_its_pgn():
+    """The @emits tag is what suppression and TX_PGNS both read; an untagged trigger
+    would raise on the send path instead of being filterable."""
+    for path, trigger in mapping._CHANNEL_MAP.items():
+        assert isinstance(getattr(trigger, "pgn", None), int), f"{path} has no @emits"
+
+
+def test_tx_pgns_matches_what_the_triggers_actually_build():
+    """TX_PGNS is derived from the tags, so this checks the tags themselves are
+    honest: what each trigger builds must be what it claims to emit."""
+    for path, trigger in mapping._CHANNEL_MAP.items():
+        msg = mapping.trigger_n2k_frame(path)
+        if msg is not None:
+            assert msg.PGN == trigger.pgn, f"{path} tagged {trigger.pgn}, built {msg.PGN}"
 
 
 class _NotReadyDevice(_StubDevice):

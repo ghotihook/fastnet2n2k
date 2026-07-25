@@ -122,6 +122,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n2k-priority", type=lambda x: int(x, 0), default=None,
                    help="Override the CAN priority (0–7, 0=highest) for ALL transmitted "
                         "frames. Default: each PGN uses its NMEA2000 standard priority.")
+    p.add_argument("--ignore-pgn", metavar="PGN", action="append", default=[],
+                   help="Do not transmit this PGN, and don't advertise it as one we "
+                        "transmit. Repeatable and/or comma-separated: "
+                        "--ignore-pgn 130312,128275. Note a PGN can carry more than "
+                        "one channel (130306 = all wind, 130312 = sea AND air temp).")
     p.add_argument("--unique", type=int, default=fnv_unique(),
                    help="Device NAME unique number (default: derived from hostname)")
     p.add_argument("--live-data", action="store_true",
@@ -132,7 +137,29 @@ def parse_args() -> argparse.Namespace:
     args = p.parse_args()
     if args.n2k_priority is not None and not 0 <= args.n2k_priority <= 7:
         p.error("--n2k-priority must be 0–7")
+    args.ignore_pgn = _parse_ignored_pgns(p, args.ignore_pgn)
     return args
+
+
+def _parse_ignored_pgns(p: argparse.ArgumentParser, values: list) -> frozenset:
+    """Flatten the repeated/comma-separated --ignore-pgn values into a set of ints.
+
+    Anything we don't transmit is a hard error rather than a no-op: a mistyped PGN
+    would otherwise look like it worked while the frames kept flowing.
+    """
+    pgns = set()
+    for value in values:
+        for token in value.replace(",", " ").split():
+            try:
+                pgns.add(int(token, 0))
+            except ValueError:
+                p.error(f"--ignore-pgn: {token!r} is not a number")
+    unknown = pgns - set(mapping.TX_PGNS)
+    if unknown:
+        p.error("--ignore-pgn: not transmitted by this bridge: "
+                f"{', '.join(str(n) for n in sorted(unknown))}. Valid: "
+                f"{', '.join(str(n) for n in mapping.TX_PGNS)}")
+    return frozenset(pgns)
 
 
 def make_device(args: argparse.Namespace) -> N2KDevice:
@@ -146,7 +173,7 @@ def make_device(args: argparse.Namespace) -> N2KDevice:
         model_id="fastnet2n2k",
         model_version=__version__,
         software_version_code=__version__,
-        transmit_pgns=mapping.TX_PGNS,
+        transmit_pgns=mapping.tx_pgns(),   # honours --ignore-pgn; set it before this
     )
 
 
@@ -174,6 +201,14 @@ async def run(args: argparse.Namespace) -> int:
     then would have nowhere to go.
     """
     logger.info("fastnet2n2k %s", __version__)
+    # Before make_device: the transmit-PGN list is baked into the device at creation,
+    # so suppression has to be in place first or we'd advertise PGNs we never send.
+    if args.ignore_pgn:
+        mapping.set_ignored_pgns(args.ignore_pgn)
+        logger.info("Suppressing PGNs (--ignore-pgn): %s",
+                    ", ".join(str(pgn) for pgn in sorted(args.ignore_pgn)))
+        if not mapping.tx_pgns():
+            logger.warning("Every PGN is suppressed — nothing will be transmitted")
     try:
         device = make_device(args)
     except (OSError, can.CanError) as exc:
