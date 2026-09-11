@@ -119,7 +119,7 @@ User=root
 # safe alongside another CAN service (e.g. an n2k2ip gateway) sharing can0.
 ExecStartPre=/bin/sh -c 'ip link show can0 | grep -qw UP || ip link set can0 up type can bitrate 250000 restart-ms 100 2>/dev/null; ip link show can0 | grep -qw UP'
 
-ExecStart=/usr/local/bin/fastnet2n2k --serial /dev/ttyUSB0 --channel can0
+ExecStart=/usr/local/bin/fastnet2n2k --serial /dev/ttyAMA5 --channel can0
 Restart=always
 RestartSec=10
 
@@ -215,6 +215,7 @@ the data out themselves.
 | Sea / air temperature | 130312 | 5 | |
 | Barometric pressure | 130314 | 5 | |
 | Tidal set & drift | 129291 | 3 | reference per the instrument |
+| House battery voltage | 127508 | 6 | instance 0 |
 | Autopilot mode & target | 127237 | 2 | see note below |
 | Raw boatspeed, heading, AWS, AWA | 130824 | 7 | B&G proprietary, full rate — see note below |
 
@@ -287,8 +288,9 @@ volume never delays navigation data.
 > - Displays ignore keys they don't know. `--ignore-pgn 130824` turns them off.
 
 Data arrives from pyfastnet 3.0 already in **SI** on Signal K paths, so it maps
-almost 1:1 onto NMEA 2000 — no unit conversion here. **Sign** comes straight from the
-decoded value; **True vs Magnetic** is carried by the path (the B&G instrument's own
+almost 1:1 onto NMEA 2000 — no unit conversion here (the raw sensor channels are
+sensor counts, and pass through as counts). **Sign** comes straight from the decoded
+value; **True vs Magnetic** is carried by the path (the B&G instrument's own
 reference — the Fastnet stream has no variation to convert).
 
 Encoding, CAN-ID construction, fast-packet framing and ISO address claiming (250
@@ -374,13 +376,14 @@ re-confirm it on the wire are in
 
 ```bash
 source .venv/bin/activate
-pip install -e ".[test]"   # or: pip install pytest
+pip install -e . pytest
 python -m pytest tests/ -q
 ```
 
-The suite drives the mapping with pyfastnet's bundled capture files and
-round-trips the resulting NMEA 2000 messages to assert PGNs, unit conversions,
-T/M references, sign passthrough, the send throttle, and the full
+The suite drives the mapping with the Fastnet captures in `tests/data/` and
+round-trips the resulting NMEA 2000 messages to assert PGNs, units, T/M references,
+sign passthrough, the autopilot mode sequence, the raw channels' B&G byte layout,
+the send throttle (and the raw channels' exemption from it), and the full
 file→decode→send pipeline.
 
 ## Sender POC (`nmea2000_poc.py`)

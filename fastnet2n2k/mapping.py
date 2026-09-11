@@ -9,6 +9,7 @@ about (by id, in SI units), and handing the resulting ``NMEA2000Message`` to an
 Conventions:
 - **Units**: pyfastnet v3 already emits SI (radians, m/s, Kelvin, Pascals, metres) —
   the same units NMEA2000 uses — so values pass straight through. No conversion here.
+  The B&G raw channels are sensor counts, not SI, and pass through as counts.
 - **Sign** is taken directly from the decoded value.
 - **T/M reference** is carried by the Signal K *path* (``navigation.headingMagnetic``
   vs ``headingTrue``, ``environment.wind.directionMagnetic`` vs ``directionTrue``,

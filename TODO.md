@@ -82,6 +82,10 @@ at ~3.5–9 Hz (~70 frames/s total) while the only consumer that matters
 (flightrecorder_n2k) buckets at **1 Hz with no carry-forward**, so it just needs
 ~1 message/channel/second.
 
+Out of scope: the raw sensor channels (130824) are deliberately exempt from the cap
+(`full_rate`) and add ~57 frames/s on top — full rate is the point of them. Keep
+them exempt if the cap is lowered.
+
 Cheap, safe wins when revisited:
 - **Temperature double-fire.** `°C` and `°F` are the same reading in two units and
   the instruments emit both, so PGN 130312 can go out twice. **Re-measure before
