@@ -5,4 +5,4 @@ the decoded channels to NMEA2000 PGNs and transmits them on a SocketCAN interfac
 via the ``nmea2000`` (tomer-w) library. Run with ``python -m fastnet2n2k ...``.
 """
 
-__version__ = "3.3.0"
+__version__ = "3.4.0"
