@@ -126,7 +126,8 @@ def parse_args() -> argparse.Namespace:
                    help="Do not transmit this PGN, and don't advertise it as one we "
                         "transmit. Repeatable and/or comma-separated: "
                         "--ignore-pgn 130312,128275. Note a PGN can carry more than "
-                        "one channel (130306 = all wind, 130312 = sea AND air temp).")
+                        "one channel (130306 = all wind, 130312 = sea AND air temp, "
+                        "130824 = all four raw sensor channels).")
     p.add_argument("--unique", type=int, default=fnv_unique(),
                    help="Device NAME unique number (default: derived from hostname)")
     p.add_argument("--live-data", action="store_true",
