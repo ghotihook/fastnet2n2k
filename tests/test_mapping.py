@@ -11,6 +11,7 @@ import asyncio
 import math
 import os
 
+import nmea2000.pgns as pgns
 import pytest
 from fastnet_decoder import FrameBuffer
 from nmea2000.encoder import NMEA2000Encoder
@@ -25,7 +26,9 @@ KN_MS = 0.514444
 _ENC = NMEA2000Encoder(N2KFormat.CAN_FRAME_ASCII)
 
 
-def load_capture(name):
+def replay_capture(name):
+    """Feed a capture into the live store frame by frame, yielding each frame's
+    {path: value} after it lands — for tests that care what happened in between."""
     live_data.clear()
     mapping._channel_last_sent.clear()
     mapping.set_ignored_pgns(())   # module state: don't leak suppression between tests
@@ -36,8 +39,15 @@ def load_capture(name):
         fb.add_to_buffer(data[i:i + 256])
         fb.get_complete_frames()
         while not fb.frame_queue.empty():
-            for path, value in fb.frame_queue.get().get("values", {}).items():
+            values = fb.frame_queue.get().get("values", {})
+            for path, value in values.items():
                 update_live_data(path, value)
+            yield values
+
+
+def load_capture(name):
+    for _ in replay_capture(name):
+        pass
 
 
 def fval(msg, fid):
@@ -136,6 +146,76 @@ def test_heel_sign_passthrough():
     assert fval(port, "roll") < 0 < fval(stb, "roll")
     assert math.degrees(fval(port, "roll")) == pytest.approx(-19.6, abs=0.1)
     assert math.degrees(fval(stb, "roll")) == pytest.approx(33.7, abs=0.1)
+
+
+# ── Autopilot (127237) ────────────────────────────────────────────────────────
+
+def _autopilot_frames(name):
+    """The 127237 built on each autopilot-state update while replaying ``name``."""
+    for values in replay_capture(name):
+        if "steering.autopilot.state" in values:
+            yield mapping.trigger_n2k_frame("steering.autopilot.state")
+
+
+def _runs(items):
+    """Collapse consecutive repeats: [a, a, b, a] → [a, b, a]."""
+    out = []
+    for item in items:
+        if not out or out[-1] != item:
+            out.append(item)
+    return out
+
+
+def test_autopilot_mode_sequence():
+    # example2 exercises every mode but route: compass, Power and wind, with
+    # standby between each.
+    modes = _runs(fval(msg, "steeringMode")
+                  for msg in _autopilot_frames("example2_fastnet_data.txt"))
+    assert modes == ["Main Steering", "Heading Control", "Main Steering",
+                     "Heading Control", "Main Steering", "Non-Follow-Up Device",
+                     "Main Steering", "Heading Control", "Main Steering"]
+
+
+def test_autopilot_target_only_while_steering_to_a_heading():
+    """Standby and Power send no target, even though the old compass target is
+    still on the wire after disengaging."""
+    lingering = False
+    for msg in _autopilot_frames("big_with_ap_actions.txt"):
+        target = fval(msg, "headingToSteerCourse")
+        if fval(msg, "steeringMode") == "Heading Control":
+            assert target is not None
+        else:
+            assert target is None
+            lingering |= live_data.get(
+                "steering.autopilot.target.headingMagnetic") is not None
+    assert lingering   # the case the rule exists for really is in this capture
+
+
+def test_autopilot_frame_round_trips():
+    """What we don't know goes out as not-available, not as the template's zeros."""
+    load_capture("big_with_ap_actions.txt")
+    update_live_data("steering.autopilot.state", "auto")
+    update_live_data("steering.autopilot.target.headingMagnetic", math.radians(331))
+    msg = mapping.process_autopilot()
+    assert msg.PGN == 127237
+    # Reassemble the fast-packet: each frame starts with a sequence byte, and the
+    # first frame's next byte is the payload length.
+    joined = b"".join(bytes.fromhex(frame.decode().split(" ", 1)[1])[1:]
+                      for frame in _ENC.encode(msg))
+    payload = joined[1:1 + joined[0]]
+    back = {f.id: f.value for f in
+            pgns.decode_pgn_127237(int.from_bytes(payload, "little"), len(payload) * 8).fields}
+    assert back["steeringMode"] == "Heading Control"
+    assert back["headingReference"] == "Magnetic"
+    assert math.degrees(back["headingToSteerCourse"]) == pytest.approx(331, abs=0.01)
+    assert back["vesselHeading"] is not None
+    for field in mapping._AUTOPILOT_UNKNOWN:
+        assert back[field] is None, f"{field} should be not-available"
+
+
+def test_unknown_autopilot_state_sends_nothing():
+    update_live_data("steering.autopilot.state", None)
+    assert mapping.process_autopilot() is None
 
 
 class _StubDevice:

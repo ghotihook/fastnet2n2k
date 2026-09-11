@@ -213,6 +213,7 @@ the data out themselves.
 | Sea / air temperature | 130312 | 5 | |
 | Barometric pressure | 130314 | 5 | |
 | Tidal set & drift | 129291 | 3 | reference per the instrument |
+| Autopilot mode & target | 127237 | 2 | see note below |
 
 The **Priority** column is each PGN's NMEA 2000 standard CAN priority (0 = highest,
 7 = lowest) — the values used unless you override them all with `--n2k-priority N`.
@@ -232,6 +233,26 @@ The **Priority** column is each PGN's NMEA 2000 standard CAN priority (0 = highe
 >   the derived-data plugin.
 > - **Do not** configure a second keel/transducer offset on any downstream plotter or
 >   gateway — it would double-count and read shallow.
+
+> **Autopilot (127237 Heading/Track Control).** The H2000 pilot's mode is sent as the
+> PGN's steering mode, with the compass target as heading-to-steer:
+>
+> | Pilot mode | Steering mode | Heading-to-steer |
+> |---|---|---|
+> | Standby | Main Steering | not available |
+> | Compass | Heading Control | compass target |
+> | Wind | Heading Control | compass target |
+> | Power | Non-Follow-Up Device | not available |
+> | NMEA WP | Track Control | compass target |
+>
+> - **Wind and compass look the same on the bus** — the standard has no wind mode.
+> - **The target is dropped in standby and Power** even though Fastnet keeps sending
+>   the last one, so a disengaged pilot never advertises a heading it isn't steering to.
+> - **Engaging reads 0° for one update** before the real target arrives. It passes
+>   through, because a 0° target can't be told apart from north.
+> - It is a status broadcast only. A plotter may show autopilot controls on seeing it;
+>   they do nothing, since nothing here listens for commands. If that is unwanted, or
+>   another autopilot on the NMEA 2000 bus already sends 127237, use `--ignore-pgn 127237`.
 
 Data arrives from pyfastnet 3.0 already in **SI** on Signal K paths, so it maps
 almost 1:1 onto NMEA 2000 — no unit conversion here. **Sign** comes straight from the
