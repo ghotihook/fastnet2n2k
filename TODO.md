@@ -51,11 +51,12 @@ shipping a PGN nothing has ever verified.
 ## Follow-ups to the raw channels in B&G 130824
 
 The four raw channels go out as B&G key-value data (PGN 130824, keys = Fastnet
-channel numbers) at full rate — see the README. This replaced the earlier 65280–65282
-design (reverted commit `9f3079e`, and fastnet2ip's encoder), which used a malformed
-header (`7D 81`: reserved bits clear, where real B&G frames send `7D 99`), documented
-signed angles as `uint16`, and needed a monkeypatch that the library's native 130824
-encoder makes unnecessary.
+channel numbers) at full rate — see
+[`docs/bandg_130824_raw_channels.md`](docs/bandg_130824_raw_channels.md). This
+replaced the earlier 65280–65282 design (reverted commit `9f3079e`, and fastnet2ip's
+encoder), which used a malformed header (`7D 81`: reserved bits clear, where real B&G
+frames send `7D 99`), documented signed angles as `uint16`, and needed a monkeypatch
+that the library's native 130824 encoder makes unnecessary.
 
 - **The second value of each raw pair.** Fastnet carries raw channels as format 0x0A,
   *two* signed 16-bit values (`display_text` shows `first / second`: AWS `778 / 701`,
@@ -83,7 +84,7 @@ at ~3.5–9 Hz (~70 frames/s total) while the only consumer that matters
 ~1 message/channel/second.
 
 Out of scope: the raw sensor channels (130824) are deliberately exempt from the cap
-(`full_rate`) and add ~57 frames/s on top — full rate is the point of them. Keep
+(`full_rate`) and add ~70 frames/s on top — full rate is the point of them. Keep
 them exempt if the cap is lowered.
 
 Cheap, safe wins when revisited:

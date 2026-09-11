@@ -280,12 +280,15 @@ volume never delays navigation data.
 >   speeds are sensor counts. B&G gear has never been seen sending these four keys, so
 >   this value format is ours.
 > - **One key per message**, which fits a single CAN frame; every update is sent, at
->   whatever rate the instruments produce it (about 57 frames/s in the captures, ~3% of
+>   whatever rate the instruments produce it (about 70 frames/s for all four, ~4% of
 >   the bus).
 > - Fastnet actually carries **two** 16-bit values per raw channel; pyfastnet exposes
 >   only the first, so only that is sent. The second could follow later as a 4-byte
 >   value under the same key without breaking decoders that honour the length.
 > - Displays ignore keys they don't know. `--ignore-pgn 130824` turns them off.
+>
+> The frame byte by byte, why it uses B&G's format, a decoder and references are in
+> [`docs/bandg_130824_raw_channels.md`](docs/bandg_130824_raw_channels.md).
 
 Data arrives from pyfastnet 3.0 already in **SI** on Signal K paths, so it maps
 almost 1:1 onto NMEA 2000 — no unit conversion here (the raw sensor channels are
