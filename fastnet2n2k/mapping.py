@@ -215,6 +215,48 @@ def process_rudder():
     return _build(127245, 2, instance=0, position=ra, angleOrder=None)
 
 
+# pyfastnet's steering.autopilot.state → 127237 steeringMode. The standard has no wind
+# mode, so wind steers as Heading Control, the same as compass: the pilot is holding a
+# heading either way, and consumers can't tell the two apart. B&G "Power" is steering
+# from the +/- buttons, i.e. non-follow-up.
+_STEERING_MODE = {
+    "standby":       "Main Steering",
+    "auto":          "Heading Control",
+    "wind":          "Heading Control",
+    "directControl": "Non-Follow-Up Device",
+    "route":         "Track Control",
+}
+
+# The 127237 fields Fastnet doesn't carry, sent as not-available rather than left at
+# the blank template's zeros — which would claim e.g. "rudder limit not exceeded" and
+# a 0° track. Lookup fields can't take None, so they get their all-ones raw value.
+_AUTOPILOT_UNKNOWN = {
+    "rudderLimitExceeded": 3, "offHeadingLimitExceeded": 3,     # 2-bit lookups
+    "offTrackLimitExceeded": 3, "override": 3,
+    "turnMode": 7, "commandedRudderDirection": 7,               # 3-bit lookups
+    **dict.fromkeys(("commandedRudderAngle", "track", "rudderLimit", "offHeadingLimit",
+                     "radiusOfTurnOrder", "rateOfTurnOrder", "offTrackLimit")),
+}
+
+
+@emits(127237)
+def process_autopilot():
+    mode = _STEERING_MODE.get(get_live_data("steering.autopilot.state"))
+    if mode is None:
+        return None
+    # The compass target outlives the engagement — it stays on the wire in standby
+    # while the boat turns away from it — so only send it while the pilot is actually
+    # steering to a heading. Engaging reads 0° for one update before the real target
+    # arrives; that passes through, since a 0° target is indistinguishable from north.
+    target = None
+    if mode in ("Heading Control", "Track Control"):
+        target = _wrap(get_live_data("steering.autopilot.target.headingMagnetic"))
+    return _build(127237, 2, steeringMode=mode, headingReference="Magnetic",
+                  headingToSteerCourse=target,
+                  vesselHeading=_wrap(get_live_data("navigation.headingMagnetic")),
+                  **_AUTOPILOT_UNKNOWN)
+
+
 @emits(128000)
 def process_leeway():
     lw = get_live_data("navigation.leewayAngle")   # rad
@@ -340,6 +382,7 @@ _CHANNEL_MAP = {
     "navigation.headingMagnetic":                   process_heading,
     "navigation.headingTrue":                       process_heading,
     "steering.rudderAngle":                         process_rudder,
+    "steering.autopilot.state":                     process_autopilot,
     "navigation.speedThroughWater":                 process_boatspeed,
     "environment.depth.belowTransducer":            process_depth,
     "environment.wind.angleApparent":               process_apparent_wind,
@@ -366,8 +409,9 @@ _CHANNEL_MAP = {
 # 130306 frame, for instance, so triggering on both would transmit it twice.
 #
 # The point of listing them is to separate "handled elsewhere" from "not transmitted
-# at all". pyfastnet decodes about twenty more standard paths than we map — autopilot,
-# waypoint and performance/racing data — and those are simply absent from both dicts.
+# at all". pyfastnet decodes about twenty more standard paths than we map — autopilot
+# detail, waypoint and performance/racing data — and those are simply absent from both
+# dicts.
 # The text is the reason, shown at DEBUG by trigger_n2k_frame.
 _SENT_WITH_ANOTHER_PATH = {
     "environment.wind.speedApparent":      "sent with environment.wind.angleApparent",
@@ -377,6 +421,7 @@ _SENT_WITH_ANOTHER_PATH = {
     "navigation.attitude.pitch":           "sent with navigation.attitude.roll",
     "navigation.trip.log":                 "sent with navigation.log",
     "environment.current.drift":           "sent with environment.current.set*",
+    "steering.autopilot.target.headingMagnetic": "sent with steering.autopilot.state",
 }
 
 # PGNs this node can transmit, derived from the @emits tags so adding or retiring a

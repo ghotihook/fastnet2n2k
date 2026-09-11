@@ -27,5 +27,5 @@ def test_full_capture_emits_expected_pgns():
         pgns.add(msg.PGN)
 
     for expected in {127250, 130306, 128259, 128267, 129026, 130312, 127245,
-                     129025, 129291}:
+                     129025, 129291, 127237}:
         assert expected in pgns, f"missing PGN {expected}; got {sorted(pgns)}"
