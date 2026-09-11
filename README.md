@@ -293,6 +293,31 @@ kernel's `BOTHER` path, which has a known first-open quirk. `fastnet2n2k` works 
 it automatically (`_force_baudrate` in `input_source.py`); the full diagnosis and the
 supporting measurements are in [`docs/uart_first_open_baud_fix.md`](docs/uart_first_open_baud_fix.md).
 
+### RS485 tap boards with automatic direction control
+
+If the Fastnet side is tapped through an RS485 transceiver with **automatic direction
+control** (Waveshare's carrier boards and HATs use one: TX low raises DE, so the driver
+turns on whenever TX is low), check what the TX pin does *during boot*, before the UART
+overlay muxes it.
+
+On BCM2711 the pad reset defaults split at GPIO8 — **GPIO0-8 pull up, GPIO9-27 pull
+down** — so a TX pin in the pull-down range sits low from reset until the kernel claims
+it, holding the driver on and **jamming the instrument bus for the length of every
+boot**. The bridge never transmits, so this is invisible from the software side: the
+damage is done before its process starts, and by the time data is flowing the bus is
+healthy again with the instrument alarm already latched.
+
+Pin the line high from the firmware, using the TX GPIO of whichever channel you are on:
+
+```
+# /boot/firmware/config.txt
+gpio=12=op,dh
+```
+
+Full diagnosis, the channel/overlay mapping for a CM4 in a CM5 carrier, and how to
+re-confirm it on the wire are in
+[`docs/rs485_tx_boot_glitch.md`](docs/rs485_tx_boot_glitch.md).
+
 ## Tests
 
 ```bash
