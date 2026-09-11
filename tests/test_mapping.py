@@ -218,6 +218,59 @@ def test_unknown_autopilot_state_sends_nothing():
     assert mapping.process_autopilot() is None
 
 
+# ── B&G raw channels (130824) ─────────────────────────────────────────────────
+
+def _payload(msg):
+    """The encoded 130824 payload, fast-packet framing removed. Asserts it went out
+    as a single CAN frame."""
+    frames = _ENC.encode(msg)
+    assert len(frames) == 1
+    return bytes.fromhex(frames[0].decode().split(" ", 1)[1])[2:]   # seq + length bytes
+
+
+@pytest.mark.parametrize("path, key", sorted(mapping._BANDG_RAW_KEYS.items()))
+def test_raw_channel_is_bandg_key_value(path, key):
+    update_live_data(path, -8246)
+    msg = mapping.trigger_n2k_frame(path)
+    assert msg.PGN == 130824 and msg.priority == 7
+    # B&G header (381, reserved bits set, marine), key + length 2, signed LE value —
+    # the layout real B&G gear sends (canboat's 130824 samples start 7d 99).
+    assert _payload(msg) == (bytes.fromhex("7d99") + (key | 2 << 12).to_bytes(2, "little")
+                             + (-8246).to_bytes(2, "little", signed=True))
+
+
+def test_raw_channel_decodes_as_bandg():
+    update_live_data("bandg.navigation.rawHeading", 12345)
+    payload = _payload(mapping.trigger_n2k_frame("bandg.navigation.rawHeading"))
+    back = {f.id: f for f in
+            pgns.decode_pgn_130824(int.from_bytes(payload, "little"), len(payload) * 8).fields}
+    assert (back["manufacturerCode"].raw_value, back["industryCode"].raw_value) == (381, 4)
+    [entry] = back["##list##"].value   # the key/length/value entries, one per key
+    assert (entry["key"].raw_value, entry["length"].raw_value) == (0x4A, 2)
+
+
+def test_raw_channel_out_of_range_sends_nothing():
+    update_live_data("bandg.wind.rawSpeedApparent", 40000)
+    assert mapping.trigger_n2k_frame("bandg.wind.rawSpeedApparent") is None
+
+
+def test_raw_channels_go_out_at_full_rate(monkeypatch):
+    """Every raw update is sent — no MIN_SEND_INTERVAL — while a capped path in the
+    same replay is thinned. The clock is frozen, so a capped path sends exactly once."""
+    monkeypatch.setattr(mapping.time, "monotonic", lambda: 1000.0)
+    dev = _StubDevice()
+    mapping.set_device(dev)
+    updates = 0
+    for values in replay_capture("example2_fastnet_data.txt"):
+        for path in values:
+            if path in mapping._BANDG_RAW_KEYS and values[path] is not None:
+                updates += 1
+            asyncio.run(mapping.process_channel(path))
+    raw_sent = sum(msg.PGN == 130824 for msg in dev.sent)
+    assert updates > 1000 and raw_sent == updates
+    assert sum(msg.PGN == 128259 for msg in dev.sent) == 1   # boatspeed: capped
+
+
 class _StubDevice:
     ready = True
 

@@ -16,8 +16,9 @@ Conventions:
   path is present. No layout field to inspect.
 - **Cadence**: a PGN is sent on every update (event-driven) — a repeated value is
   still live data worth putting on the bus — debounced only by MIN_SEND_INTERVAL,
-  which caps any one path's rate. When the source stops, output stops and consumers
-  time the PGN out themselves.
+  which caps any one path's rate — except the B&G raw channels, which go out at full
+  source rate for logging. When the source stops, output stops and consumers time the
+  PGN out themselves.
 """
 
 import logging
@@ -90,31 +91,39 @@ def set_ignored_pgns(pgns_) -> None:
     _ignored_pgns = frozenset(pgns_)
 
 
-def emits(pgn):
+def emits(pgn, full_rate=False):
     """Tag a trigger with the PGN it builds.
 
     One declaration serves three readers: ``--ignore-pgn`` suppression (which needs
     to know a path's PGN *before* calling the trigger, so a suppressed path costs
     nothing), the advertised ``TX_PGNS`` list, and anyone reading the code. Keeping
     them derived from the same tag means they cannot drift apart.
+
+    ``full_rate`` exempts the trigger from MIN_SEND_INTERVAL: every update is sent, at
+    whatever rate the source produces it.
     """
     def tag(fn):
         fn.pgn = pgn
+        fn.full_rate = full_rate
         return fn
     return tag
 
 
-def _build(pgn, priority, **fields):
+def _build(pgn, priority, variant=None, **fields):
     """Build an NMEA2000Message for ``pgn`` with the given field id → SI value pairs.
 
     ``None`` values are written through as "data not available". Source is left 0 so
-    the N2KDevice substitutes its claimed address.
+    the N2KDevice substitutes its claimed address. ``variant`` picks one of several
+    layouts sharing a PGN number — proprietary PGNs, where the manufacturer code in
+    the payload decides — by the library's id for it, e.g. "bGKeyValueData".
     """
     # The nmea2000 library defines one function per PGN, named decode_pgn_<number>.
     # Called with an empty payload it hands back a blank message with all of that
     # PGN's fields present, which we then fill in — so this is "give me a blank
     # 130306 to fill in", looked up by number because there is no by-number API.
-    msg = getattr(pgns, f"decode_pgn_{pgn}")(0, 0)
+    # A shared number gets decode_pgn_<number>_<variant> per layout instead.
+    name = f"decode_pgn_{pgn}_{variant}" if variant else f"decode_pgn_{pgn}"
+    msg = getattr(pgns, name)(0, 0)
     msg.source = 0
     msg.priority = _priority_override if _priority_override is not None else priority
     msg.timestamp = datetime.now(timezone.utc)
@@ -373,6 +382,45 @@ def process_position():
     return _build(129025, 2, latitude=pos["latitude"], longitude=pos["longitude"])
 
 
+# ── B&G raw sensor channels (130824 key-value) ────────────────────────────────
+# The uncalibrated sensor readings, for logging. There is no standard PGN for them,
+# so they go out in B&G's own proprietary key-value PGN, 130824, in B&G's layout:
+# after the manufacturer header, a 12-bit key and 4-bit byte length, then the value.
+# B&G's keys are Fastnet channel numbers (canboat, BANDG_KEY_VALUE: 65 Water Speed =
+# 0x41, 127 VMG = 0x7F, ...), so each raw channel keeps its own channel number here.
+# B&G gear has never been seen sending these four keys; the value format is ours:
+# Fastnet carries them as signed 16-bit (format 0x0A), and they pass through as that,
+# unscaled.
+#
+# Sent at full rate, one key per message: header + one key/value is 6 bytes, which
+# fits a single CAN frame; a second key would take two. Lowest priority, so the
+# volume never delays navigation data.
+_BANDG_RAW_KEYS = {
+    "bandg.navigation.rawSpeedThroughWater": 0x42,   # Boatspeed (Raw)
+    "bandg.navigation.rawHeading":           0x4A,   # Heading (Raw)
+    "bandg.wind.rawSpeedApparent":           0x4E,   # Apparent Wind Speed (Raw)
+    "bandg.wind.rawAngleApparent":           0x52,   # Apparent Wind Angle (Raw)
+}
+_BANDG_HEADER = {"manufacturerCode": 381, "reserved_11": 3, "industryCode": 4}   # 7D 99
+
+
+def _bandg_raw(path, key):
+    """The trigger that sends ``path`` as B&G key ``key``."""
+    @emits(130824, full_rate=True)
+    def process_bandg_raw():
+        value = get_live_data(path)
+        if value is None:
+            return None
+        raw = round(value)
+        if not -0x8000 <= raw <= 0x7FFF:
+            _warn_throttled(f"raw_range:{path}",
+                            "%s = %s doesn't fit signed 16 bits — not sent", path, value)
+            return None
+        return _build(130824, 7, "bGKeyValueData", **_BANDG_HEADER,
+                      key=key, length=2, value=raw & 0xFFFF)
+    return process_bandg_raw
+
+
 # ── Path → trigger map ────────────────────────────────────────────────────────
 # The keys are Signal-K-style dotted path names — a naming convention pyfastnet emits
 # and we key on; there is no Signal K server or protocol in this pipeline, just the
@@ -402,6 +450,7 @@ _CHANNEL_MAP = {
     "navigation.courseGreatCircle.crossTrackError": process_xte,
     "environment.current.setMagnetic":              process_set_drift,
     "environment.current.setTrue":                  process_set_drift,
+    **{path: _bandg_raw(path, key) for path, key in _BANDG_RAW_KEYS.items()},
 }
 
 # Paths we decode but deliberately do NOT trigger on, because a path in _CHANNEL_MAP
@@ -461,8 +510,8 @@ async def process_channel(path):
     suppressed path costs nothing per update). Every update
     is sent — a repeated value is still live data worth putting on the bus — subject
     to MIN_SEND_INTERVAL, which caps any one path's rate (~20 Hz) so a fast-updating
-    path can't flood the bus or CPU. ``_channel_last_sent`` holds the monotonic time
-    of each path's last send.
+    path can't flood the bus or CPU. Triggers tagged ``full_rate`` skip the cap.
+    ``_channel_last_sent`` holds the monotonic time of each path's last send.
     """
     trigger = _CHANNEL_MAP.get(path)
     if trigger is None or trigger.pgn in _ignored_pgns:
@@ -470,13 +519,15 @@ async def process_channel(path):
 
     now = time.monotonic()
     last_time = _channel_last_sent.get(path)
-    if last_time is not None and now - last_time < MIN_SEND_INTERVAL:
+    if (not trigger.full_rate and last_time is not None
+            and now - last_time < MIN_SEND_INTERVAL):
         return
 
     try:
         msg = trigger()
     except Exception as exc:   # noqa: BLE001 — one bad value mustn't kill the bridge
-        logger.warning("Frame build failed for %r (%s) — skipping", path, exc)
+        _warn_throttled(f"build:{path}", "Frame build failed for %r (%s) — skipping",
+                        path, exc)
         return
     if msg is None:
         return

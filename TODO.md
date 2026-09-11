@@ -48,62 +48,30 @@ Capture Fastnet hex **while navigating to a mark**, nav page up so `timeToGo` an
 `@emits(129284)` and assert against the capture. Writing it before that means
 shipping a PGN nothing has ever verified.
 
-## Deferred: B&G proprietary raw PGNs 65280 / 65281 / 65282
+## Follow-ups to the raw channels in B&G 130824
 
-Emit the raw (unfiltered) instrument channels as B&G manufacturer-proprietary
-single-frame PGNs, so consumers get the raw sensor values alongside the standard
-processed PGNs.
+The four raw channels go out as B&G key-value data (PGN 130824, keys = Fastnet
+channel numbers) at full rate — see the README. This replaced the earlier 65280–65282
+design (reverted commit `9f3079e`, and fastnet2ip's encoder), which used a malformed
+header (`7D 81`: reserved bits clear, where real B&G frames send `7D 99`), documented
+signed angles as `uint16`, and needed a monkeypatch that the library's native 130824
+encoder makes unnecessary.
 
-| PGN | Channels | Payload after the mfr header |
-|---|---|---|
-| 65280 | Apparent Wind Speed (Raw) + Apparent Wind Angle (Raw) | `<HH>` wsRaw, waRaw |
-| 65281 | Heading (Raw) | `<H>` headingRaw |
-| 65282 | Boatspeed (Raw) | `<H>` boatspeedRaw |
-
-These paths are simply absent from `_CHANNEL_MAP` in `fastnet2n2k/mapping.py`, so
-they decode but don't transmit. (They are not listed in `_SENT_WITH_ANOTHER_PATH`
-either — that dict is only for paths another trigger already covers.)
-
-### Wire format (must stay byte-identical to fastnet2ip)
-
-- 2-byte manufacturer header `7D 81` = `struct.pack('<H', (4 << 13) | 381)`.
-- Then raw `uint16` value(s), little-endian, **no scaling** — the pyfastnet
-  "(Raw)" channels are already integer counts; pass them straight through.
-- `0xFFFF` means "no data" (use it when a channel is absent).
-
-This matches `fastnet2ip`'s `_n2k_proprietary` encoder and the `flightrecorder_n2k`
-decoder (`_decode_proprietary`), so one decoder handles frames from either bridge.
-**Verify byte-for-byte against fastnet2ip if you re-add this.**
-
-### A working implementation already exists
-
-Commit **`9f3079e`** ("Add B&G proprietary raw PGNs …") implemented all of this
-with tests. It was reverted because (a) the integration is ugly and (b) the rate
-is high (see below). Start from `git show 9f3079e` rather than from scratch.
-
-### Why it's deferred
-
-1. **Rate.** The raw channels are the fastest on the bus — Heading (Raw) ~25 Hz,
-   raw wind / boatspeed ~16 Hz — so transmitting them adds a lot of traffic. Sort
-   out the output-rate strategy first (dedupe / lower `MIN_SEND_INTERVAL` /
-   decimate the raw PGNs). Note 65280 is a *combined* frame: trigger it from **one**
-   path and list the other in `_SENT_WITH_ANOTHER_PATH`, or it double-fires.
-2. **Integration is ugly.** The `nmea2000` encoder dispatches on
-   `encode_pgn_<PGN>` existing in `nmea2000.pgns` and has **no extension API**, so
-   the only hook into the correct send pipeline (which gives source-address
-   substitution + python-can retry/reconnect for free — don't bypass it) is to
-   register encoders on that module. The reverted version did this with an
-   import-time `setattr` monkeypatch + a passthrough that returned bytes stashed on
-   `raw_can_data`.
-
-### If re-adding, do it cleanly
-
-Isolate the whole adapter in its own `fastnet2n2k/proprietary.py`: own the frame
-layout (header, packing, priority) in one place, expose `build_*` handlers and a
-single explicit `register()` call (invoked from `__main__`, not as an import side
-effect), so `mapping.py` stays declarative. Tag each re-added trigger with
-`@emits(<pgn>)` — `TX_PGNS` and `--ignore-pgn` are both derived from that tag, so
-there is no separate list to update.
+- **The second value of each raw pair.** Fastnet carries raw channels as format 0x0A,
+  *two* signed 16-bit values (`display_text` shows `first / second`: AWS `778 / 701`,
+  boatspeed `492 / 2092`, heading usually repeating the first). pyfastnet projects
+  only `first`, so only that is sent. What `second` means is unknown. Exposing it
+  needs a pyfastnet change; on the wire it becomes a 4-byte value (length 4) under
+  the same key, which costs a second CAN frame per update.
+- **Recorder decoding.** flightrecorder_n2k archives every CAN frame, so the raw
+  values are captured already, but it needs a parser to turn them into columns
+  (`aws_raw` / `awa_raw` / `stw_raw`, which the 0183 XDR path fills today, plus a new
+  raw heading). Parse the payload directly: the `nmea2000` library's 130824 decode
+  returns each value's bytes reversed.
+- **Performance channels.** The same PGN is how B&G gear itself carries target TWA,
+  polar performance, VMG, mast angle and the rest — all channels we decode but don't
+  send. Sending them under B&G's own keys, in the value types canboat documents for
+  those keys, would let a B&G/Navico display on the bus show them natively.
 
 ## Deferred: output rate / cadence
 

@@ -178,9 +178,10 @@ transmit-PGN list this node advertises to the bus, so it doesn't claim to send w
 it won't. Only PGNs from the table below are accepted; anything else is a startup
 error rather than a silent no-op, so a typo can't look like it worked.
 
-Suppression is per **PGN**, and two PGNs carry more than one kind of data:
-`--ignore-pgn 130306` silences apparent wind, true wind *and* TWD, and
-`--ignore-pgn 130312` silences both sea *and* air temperature.
+Suppression is per **PGN**, and some PGNs carry more than one kind of data:
+`--ignore-pgn 130306` silences apparent wind, true wind *and* TWD,
+`--ignore-pgn 130312` silences both sea *and* air temperature, and
+`--ignore-pgn 130824` silences all four raw sensor channels.
 
 The source address is **not** a flag — it is left to the `nmea2000` library, which
 picks a preferred address and resolves conflicts via ISO address claiming, then
@@ -195,7 +196,8 @@ detail.
 ## What it sends
 
 Each Fastnet channel is mapped to the matching PGN and emitted **only when the
-channel updates**, rate-capped at 0.05 s per path. There is no periodic
+channel updates**, rate-capped at 0.05 s per path (the raw sensor channels are the
+exception: they go out at full rate). There is no periodic
 re-broadcast, so when the instruments go quiet the output stops and consumers time
 the data out themselves.
 
@@ -214,9 +216,12 @@ the data out themselves.
 | Barometric pressure | 130314 | 5 | |
 | Tidal set & drift | 129291 | 3 | reference per the instrument |
 | Autopilot mode & target | 127237 | 2 | see note below |
+| Raw boatspeed, heading, AWS, AWA | 130824 | 7 | B&G proprietary, full rate — see note below |
 
 The **Priority** column is each PGN's NMEA 2000 standard CAN priority (0 = highest,
 7 = lowest) — the values used unless you override them all with `--n2k-priority N`.
+130824 is proprietary and has no standard priority; it is sent at the lowest so its
+volume never delays navigation data.
 
 > **Depth is below keel.** The B&G/H2000 applies its keel offset internally, so the
 > depth on the Fastnet wire is already **below-keel**. Fastnet never reports the
@@ -254,11 +259,37 @@ The **Priority** column is each PGN's NMEA 2000 standard CAN priority (0 = highe
 >   they do nothing, since nothing here listens for commands. If that is unwanted, or
 >   another autopilot on the NMEA 2000 bus already sends 127237, use `--ignore-pgn 127237`.
 
+> **Raw sensor channels (130824, B&G key-value data).** The uncalibrated readings —
+> for logging, so calibration can be refitted later — have no standard PGN. They go
+> out in B&G's own proprietary key-value PGN, in B&G's layout: the B&G manufacturer
+> header (`7D 99`: code 381, marine), then a 12-bit key and 4-bit byte length, then
+> the value. B&G's keys are **Fastnet channel numbers** (canboat's `BANDG_KEY_VALUE`
+> table: 65 = Water Speed = 0x41, 127 = VMG = 0x7F, …), so each raw channel keeps its
+> own:
+>
+> | Key | Fastnet channel |
+> |---|---|
+> | 66 (0x42) | Boatspeed (Raw) |
+> | 74 (0x4A) | Heading (Raw) |
+> | 78 (0x4E) | Apparent Wind Speed (Raw) |
+> | 82 (0x52) | Apparent Wind Angle (Raw) |
+>
+> - **Values are signed 16-bit, unscaled** — exactly as Fastnet carries them (format
+>   0x0A), length 2. Heading and wind angle are binary angles (65536 = 360°); the
+>   speeds are sensor counts. B&G gear has never been seen sending these four keys, so
+>   this value format is ours.
+> - **One key per message**, which fits a single CAN frame; every update is sent, at
+>   whatever rate the instruments produce it (about 57 frames/s in the captures, ~3% of
+>   the bus).
+> - Fastnet actually carries **two** 16-bit values per raw channel; pyfastnet exposes
+>   only the first, so only that is sent. The second could follow later as a 4-byte
+>   value under the same key without breaking decoders that honour the length.
+> - Displays ignore keys they don't know. `--ignore-pgn 130824` turns them off.
+
 Data arrives from pyfastnet 3.0 already in **SI** on Signal K paths, so it maps
 almost 1:1 onto NMEA 2000 — no unit conversion here. **Sign** comes straight from the
 decoded value; **True vs Magnetic** is carried by the path (the B&G instrument's own
-reference — the Fastnet stream has no variation to convert). The B&G proprietary raw
-PGNs (65280–65282) are not emitted.
+reference — the Fastnet stream has no variation to convert).
 
 Encoding, CAN-ID construction, fast-packet framing and ISO address claiming (250
 kbit/s, 29-bit IDs) are handled by the
