@@ -56,7 +56,8 @@ channel numbers) at full rate — see
 replaced the earlier 65280–65282 design (reverted commit `9f3079e`, and fastnet2ip's
 encoder), which used a malformed header (`7D 81`: reserved bits clear, where real B&G
 frames send `7D 99`), documented signed angles as `uint16`, and needed a monkeypatch
-that the library's native 130824 encoder makes unnecessary.
+that the library's native 130824 encoder makes unnecessary. fastnet2ip moved to the
+same 130824 frames in its 3.3.0.
 
 - **The second value of each raw pair.** Fastnet carries raw channels as format 0x0A,
   *two* signed 16-bit values (`display_text` shows `first / second`: AWS `778 / 701`,
