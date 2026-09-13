@@ -262,9 +262,10 @@ Things to know:
 
 The raw channels were first sent as single-frame PGNs 65280 (raw wind speed and
 angle), 65281 (raw heading) and 65282 (raw boatspeed), byte-identical to
-[fastnet2ip](https://github.com/ghotihook/fastnet2ip), which still uses that format.
-That version (commit `9f3079e`) was reverted, and 130824 replaced it in 3.4.0. The old
-format had three defects:
+[fastnet2ip](https://github.com/ghotihook/fastnet2ip)'s. That version (commit
+`9f3079e`) was reverted, and 130824 replaced it in 3.4.0. fastnet2ip moved to the same
+130824 frames in its 3.3.0, so one decoder reads both bridges. The old format had
+three defects:
 
 - **Its header was `7D 81`**, with the reserved bits clear. Real B&G frames send
   `7D 99`.
