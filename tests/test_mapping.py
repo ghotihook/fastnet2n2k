@@ -14,16 +14,15 @@ import os
 import nmea2000.pgns as pgns
 import pytest
 from fastnet_decoder import FrameBuffer
-from nmea2000.encoder import NMEA2000Encoder
+from nmea2000.encoder import create_encoder
 from nmea2000.input_formats import N2KFormat
-import nmea2000.encoder_formats  # noqa: F401  (registers formats)
 
 from fastnet2n2k import mapping
 from fastnet2n2k.live_store import live_data, update_live_data
 
 CAPTURES = os.path.join(os.path.dirname(__file__), "data")
 KN_MS = 0.514444
-_ENC = NMEA2000Encoder(N2KFormat.CAN_FRAME_ASCII)
+_ENC = create_encoder(N2KFormat.CAN_FRAME_ASCII)
 
 
 def replay_capture(name):

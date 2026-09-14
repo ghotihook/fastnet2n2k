@@ -5,7 +5,7 @@ decodes it with [pyfastnet](https://github.com/ghotihook/pyfastnet), maps the
 channels to **NMEA 2000** PGNs and transmits them onto a **physical CAN bus** via
 SocketCAN. Built for the
 [M5Stack CoreMP135](https://docs.m5stack.com/en/core/M5CoreMP135) but runs on any
-Linux box with a SocketCAN interface. Requires **Python 3.10+**.
+Linux box with a SocketCAN interface. Requires **Python 3.11+**.
 
 ## Quick start
 

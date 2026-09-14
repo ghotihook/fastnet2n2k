@@ -6,14 +6,13 @@ emitted message encodes through the canboat codec. (The CAN device/transport is
 covered separately; here we exercise decode → live store → mapping.)
 """
 
-from nmea2000.encoder import NMEA2000Encoder
+from nmea2000.encoder import create_encoder
 from nmea2000.input_formats import N2KFormat
-import nmea2000.encoder_formats  # noqa: F401
 
 from fastnet2n2k import mapping
 from tests.test_mapping import load_capture
 
-_ENC = NMEA2000Encoder(N2KFormat.CAN_FRAME_ASCII)
+_ENC = create_encoder(N2KFormat.CAN_FRAME_ASCII)
 
 
 def test_full_capture_emits_expected_pgns():

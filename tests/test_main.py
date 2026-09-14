@@ -21,7 +21,7 @@ from fastnet2n2k.input_source import SERIAL_CLOSED
 # This filter matches library log messages by substring, so an upstream reword
 # would silently stop it working and the journal would flood again. These tests are
 # the tripwire for that: if the phrases drift, a test fails instead of the boat's
-# journal. See the class docstring for what each case is.
+# journal. See the class docstring for why each phrase is (or isn't) dropped.
 
 def _record(msg, *args, level=logging.WARNING):
     return logging.LogRecord("x", level, __file__, 1, msg, args, None)
@@ -32,12 +32,17 @@ def filt():
     return _QuietTransientCanErrors()
 
 
-def test_drops_transmit_queue_full_spam(filt):
-    assert filt.filter(_record("python-can transmit queue full, retrying send")) is False
-
-
 def test_drops_send_failed_without_reconnecting(filt):
-    assert filt.filter(_record("send failed without reconnecting")) is False
+    """nmea2000's exact wording (ioclient.py send()), so a reword trips this test."""
+    assert filt.filter(_record("Send failed without reconnecting. Error %s",
+                               "Transmit buffer full")) is False
+
+
+def test_passes_transmit_queue_full_retries_through(filt):
+    """nmea2000 >= 2026.8 logs each retry at DEBUG without a traceback — useful
+    evidence at --log-level DEBUG, so no longer filtered."""
+    assert filt.filter(_record("python-can transmit queue full, retrying send (%s/%s)",
+                               1, 4, level=logging.DEBUG)) is True
 
 
 def test_passes_a_genuine_error_through(filt):
@@ -48,14 +53,15 @@ def test_passes_ordinary_records_through(filt):
     assert filt.filter(_record("Address claimed: %d", 100)) is True
 
 
-def test_drops_an_unrenderable_record(filt):
-    """Case 2: a record whose args can't be formatted (the seed can.Message with a
-    string timestamp). getMessage() raising is itself the signal to drop it."""
+def test_passes_an_unrenderable_record_through_without_raising(filt):
+    """A filter must never raise — Handler.handle() doesn't catch it, so the error
+    would surface in whatever library code was logging. An unrenderable record is
+    passed on for the handler to report as a normal logging error."""
     class Unformattable:
         def __str__(self):
             raise ValueError("Unknown format code 'f' for object of type 'str'")
 
-    assert filt.filter(_record("sending: %f", Unformattable())) is False
+    assert filt.filter(_record("sending: %s", Unformattable())) is True
 
 
 # ── fnv_unique ────────────────────────────────────────────────────────────────
