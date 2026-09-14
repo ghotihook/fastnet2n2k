@@ -9,16 +9,17 @@ Linux box with a SocketCAN interface. Requires **Python 3.11+**.
 
 ## Quick start
 
-**1. Install** the CLI in its own isolated environment with
+**1. Install** the CLI globally, in its own isolated environment, with
 [pipx](https://pipx.pypa.io/):
 
 ```bash
+sudo apt install pipx                    # once, if you don't have it
 sudo pipx install --global fastnet2n2k
 ```
 
-This puts a `fastnet2n2k` command on your PATH (in `/usr/local/bin`, so a
-root-run systemd service can find it too). `python -m fastnet2n2k ...` also works
-once installed. (`--global` needs pipx ≥ 1.5.)
+This puts a `fastnet2n2k` command in `/usr/local/bin`, where a root-run systemd
+service can find it too. (`--global` needs pipx ≥ 1.5.) To upgrade later, see
+[Upgrading](#upgrading).
 
 **2. Bring up the CAN bus** (once per boot — `restart-ms 100` lets the controller
 auto-recover from a bus-off):
@@ -90,15 +91,10 @@ before starting.
 > `~/.local/bin`, which a root-run service can't rely on. Use `pipx install
 > --global` so the command lands in `/usr/local/bin` instead.
 
-**1. Install globally with pipx**
+**1. Install globally with pipx** as in [Quick start](#quick-start) step 1.
 
-```bash
-sudo apt install pipx                        # once, if you don't have it
-sudo pipx install --global fastnet2n2k
-```
-
-This gives you `/usr/local/bin/fastnet2n2k`, the path the unit below uses.
-(`--global` needs pipx ≥ 1.5; run `which fastnet2n2k` to confirm the path.)
+This gives you `/usr/local/bin/fastnet2n2k`, the path the unit below uses
+(run `which fastnet2n2k` to confirm it).
 
 **2. Create the unit file**
 
@@ -148,8 +144,20 @@ sudo systemctl enable --now fastnet2n2k.service
 journalctl -u fastnet2n2k.service -f      # follow the logs
 ```
 
-To upgrade later:
-`sudo pipx upgrade --global fastnet2n2k && sudo systemctl restart fastnet2n2k`.
+To upgrade later, see [Upgrading](#upgrading).
+
+## Upgrading
+
+To move to the latest release, upgrade and restart the service:
+
+```bash
+sudo pipx upgrade --global fastnet2n2k
+sudo systemctl restart fastnet2n2k
+```
+
+Check which version you're on with `sudo pipx list --global --short` (prints e.g.
+`fastnet2n2k 3.4.1`). Releases are listed in the
+[release history on PyPI](https://pypi.org/project/fastnet2n2k/#history).
 
 ## Command-line options
 
@@ -169,8 +177,8 @@ If another device on the bus is the authority for some data — a GPS for positi
 COG/SOG, say — stop this bridge sending its version of it:
 
 ```bash
-python -m fastnet2n2k --serial /dev/ttyUSB0 --ignore-pgn 129025,129026
-python -m fastnet2n2k --serial /dev/ttyUSB0 --ignore-pgn 129025 --ignore-pgn 129026
+fastnet2n2k --serial /dev/ttyUSB0 --ignore-pgn 129025,129026
+fastnet2n2k --serial /dev/ttyUSB0 --ignore-pgn 129025 --ignore-pgn 129026
 ```
 
 A suppressed PGN is never built and never sent, and is also dropped from the

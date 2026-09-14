@@ -12,7 +12,8 @@
 #   sudo systemctl enable --now fastnet2n2k.service
 #   journalctl -u fastnet2n2k.service -f
 #
-# Update later with: sudo pipx upgrade --global fastnet2n2k
+# Upgrade to the latest release later with:
+#   sudo pipx upgrade --global fastnet2n2k && sudo systemctl restart fastnet2n2k
 
 [Unit]
 Description=fastnet2n2k Service
