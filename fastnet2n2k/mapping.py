@@ -422,6 +422,57 @@ def _bandg_raw(path, key):
     return process_bandg_raw
 
 
+# ── B&G performance channels (130824 key-value) ───────────────────────────────
+# VMG and the heading on the next tack have no standard PGN either, and B&G carries
+# them in the same key-value PGN — again under the Fastnet channel number as the key
+# (canboat, BANDG_KEY_VALUE: 127 VMG to Wind = 0x7F, 154 Heading on Opposite Tack =
+# 0x9A). Unlike the raw channels above, these are keys real B&G gear does send, in a
+# value format canboat documents, so a B&G or Navico display on the bus shows them
+# natively.
+#
+# ⚠ canboat marks the angle keys Signed; that is wrong, and following it would put a
+# heading above 180° out by 15.5°. canboat's own B&G capture (samples/bandg_tritonedge)
+# carries both PGN 130824 and the standard PGN 130306 from one box: key 157 (Wind Angle
+# to Mast) reads 239.6° unsigned against 130306's apparent wind angle of 240.3° at the
+# same instant, where signed would be −135.9°. B&G sends 0–2π at 0.0001 rad, exactly
+# like a standard N2K angle field — 2π/0.0001 = 62832 fits uint16 — so _wrap() applies
+# here as it does everywhere else in this module.
+#
+# Rate-capped like everything else (the raw channels are the only full-rate paths), and
+# priority 3, which is what real B&G gear sends this PGN at. One key per message: a
+# 16-bit value makes a 6-byte payload and so a single CAN frame, which also keeps these
+# from interleaving multi-frame messages with the full-rate raw stream on the same PGN
+# and source address.
+_BANDG_PERF_KEYS = {
+    # path: (key, resolution, transform)
+    # VMG is a *magnitude*: the H2000 drops the sign, so downwind VMG arrives positive.
+    # Measured on tests/data/big_with_ap_actions.txt, which is entirely downwind (TWA
+    # 111–150°): VMG tracks |boatspeed × cos(TWA)| to within 0.03 m/s, while the signed
+    # quantity is 2.85 m/s away. Upwind or downwind is implied by the wind angle, never
+    # by this key's sign. max() is therefore a guard, not a lossy choice — it has never
+    # fired on any capture.
+    "performance.velocityMadeGood": (127, 0.01, lambda v: max(0.0, v)),   # m/s
+    "performance.tackMagnetic":     (154, 0.0001, _wrap),                 # rad, 0–2π
+}
+
+
+def _bandg_perf(path, key, resolution, transform):
+    """The trigger that sends ``path`` as B&G key ``key``, in units of ``resolution``."""
+    @emits(130824)
+    def process_bandg_perf():
+        value = get_live_data(path)
+        if value is None:
+            return None
+        raw = round(transform(value) / resolution)
+        if not 0 <= raw <= 0xFFFF:
+            _warn_throttled(f"perf_range:{path}",
+                            "%s = %s doesn't fit B&G key %d — not sent", path, value, key)
+            return None
+        return _build(130824, 3, "bGKeyValueData", **_BANDG_HEADER,
+                      key=key, length=2, value=raw)
+    return process_bandg_perf
+
+
 # ── Path → trigger map ────────────────────────────────────────────────────────
 # The keys are Signal-K-style dotted path names — a naming convention pyfastnet emits
 # and we key on; there is no Signal K server or protocol in this pipeline, just the
@@ -452,6 +503,7 @@ _CHANNEL_MAP = {
     "environment.current.setMagnetic":              process_set_drift,
     "environment.current.setTrue":                  process_set_drift,
     **{path: _bandg_raw(path, key) for path, key in _BANDG_RAW_KEYS.items()},
+    **{path: _bandg_perf(path, *spec) for path, spec in _BANDG_PERF_KEYS.items()},
 }
 
 # Paths we decode but deliberately do NOT trigger on, because a path in _CHANNEL_MAP
@@ -460,8 +512,8 @@ _CHANNEL_MAP = {
 #
 # The point of listing them is to separate "handled elsewhere" from "not transmitted
 # at all". pyfastnet decodes about twenty more standard paths than we map — autopilot
-# detail, waypoint and performance/racing data — and those are simply absent from both
-# dicts.
+# detail, waypoint data and the performance/racing channels beyond VMG and next-tack
+# heading — and those are simply absent from both dicts.
 # The text is the reason, shown at DEBUG by trigger_n2k_frame.
 _SENT_WITH_ANOTHER_PATH = {
     "environment.wind.speedApparent":      "sent with environment.wind.angleApparent",
