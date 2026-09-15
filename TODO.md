@@ -70,10 +70,12 @@ same 130824 frames in its 3.3.0.
   (`aws_raw` / `awa_raw` / `stw_raw`, which the 0183 XDR path fills today, plus a new
   raw heading). Parse the payload directly: the `nmea2000` library's 130824 decode
   returns each value's bytes reversed.
-- **Performance channels.** The same PGN is how B&G gear itself carries target TWA,
-  polar performance, VMG, mast angle and the rest — all channels we decode but don't
-  send. Sending them under B&G's own keys, in the value types canboat documents for
-  those keys, would let a B&G/Navico display on the bus show them natively.
+- **The remaining performance channels.** VMG (key 127) and next-tack heading (key
+  154) ship in 3.5.0. The same PGN is how B&G gear carries target TWA, polar
+  performance, mast angle and the rest — still decoded but not sent. Each is three
+  more lines in `_BANDG_PERF_KEYS`, in the value types canboat documents. **Note that
+  canboat marks the angle keys signed and they are not** — see the doc; a signed
+  encoding puts any angle above 180° out by 15.5°.
 
 ## Deferred: output rate / cadence
 

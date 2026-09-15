@@ -265,9 +265,95 @@ def test_raw_channels_go_out_at_full_rate(monkeypatch):
             if path in mapping._BANDG_RAW_KEYS and values[path] is not None:
                 updates += 1
             asyncio.run(mapping.process_channel(path))
-    raw_sent = sum(msg.PGN == 130824 for msg in dev.sent)
+    raw_sent = sum(msg.PGN == 130824 and fval(msg, "key") in mapping._BANDG_RAW_KEYS.values()
+                   for msg in dev.sent)
     assert updates > 1000 and raw_sent == updates
     assert sum(msg.PGN == 128259 for msg in dev.sent) == 1   # boatspeed: capped
+
+
+
+# ── B&G performance channels (130824) ─────────────────────────────────────────
+# Same PGN and layout as the raw channels above, but keys real B&G gear sends, in the
+# value types canboat documents for them.
+
+@pytest.mark.parametrize("path, value, raw", [
+    ("performance.velocityMadeGood", 2.135, 213),      # m/s      @ 0.01   -> key 127
+    ("performance.tackMagnetic", 6.1959, 61959),       # rad 0-2pi @ 0.0001 -> key 154
+])
+def test_perf_channel_is_bandg_key_value(path, value, raw):
+    key = mapping._BANDG_PERF_KEYS[path][0]
+    update_live_data(path, value)
+    msg = mapping.trigger_n2k_frame(path)
+    # Priority 3 is what real B&G gear sends 130824 at, unlike the raw channels' 7.
+    assert msg.PGN == 130824 and msg.priority == 3
+    assert _payload(msg) == (bytes.fromhex("7d99") + (key | 2 << 12).to_bytes(2, "little")
+                             + raw.to_bytes(2, "little"))
+
+
+def test_tack_heading_above_pi_stays_unsigned():
+    """Regression guard: B&G sends 130824 angles as unsigned 0-2pi, not signed +-pi.
+
+    canboat's BANDG_KEY_VALUE marks these keys Signed, which is wrong — in canboat's
+    own B&G capture, key 157 reads 239.6 deg unsigned against 240.3 deg from the same
+    box's standard PGN 130306 at the same instant. A signed encoding would put every
+    heading above 180 deg out by 15.5 deg, so 355 deg must not come out negative.
+    """
+    update_live_data("performance.tackMagnetic", math.radians(355))
+    payload = _payload(mapping.trigger_n2k_frame("performance.tackMagnetic"))
+    raw = int.from_bytes(payload[4:6], "little")
+    assert raw == round(math.radians(355) / 0.0001)   # 61959, the full-circle value
+    assert raw > 0x7FFF                               # a signed encoding would be negative
+
+
+def test_vmg_is_a_magnitude_and_never_negative():
+    """The H2000 reports VMG unsigned — downwind VMG arrives positive, with the
+    direction implied by the wind angle. The field is unsigned too, so the clamp is a
+    guard that has never fired on any capture; it must not emit a wrapped value."""
+    update_live_data("performance.velocityMadeGood", -0.5)
+    payload = _payload(mapping.trigger_n2k_frame("performance.velocityMadeGood"))
+    assert int.from_bytes(payload[4:6], "little") == 0
+
+
+def test_perf_channel_decodes_as_bandg():
+    update_live_data("performance.tackMagnetic", 2.0589)
+    payload = _payload(mapping.trigger_n2k_frame("performance.tackMagnetic"))
+    back = {f.id: f for f in
+            pgns.decode_pgn_130824(int.from_bytes(payload, "little"), len(payload) * 8).fields}
+    assert (back["manufacturerCode"].raw_value, back["industryCode"].raw_value) == (381, 4)
+    [entry] = back["##list##"].value
+    assert (entry["key"].raw_value, entry["length"].raw_value) == (154, 2)
+
+
+def test_perf_channels_are_rate_capped(monkeypatch):
+    """Unlike the raw channels, these are display values and take MIN_SEND_INTERVAL.
+    The clock is frozen, so each perf path sends exactly once across a whole replay."""
+    monkeypatch.setattr(mapping.time, "monotonic", lambda: 1000.0)
+    dev = _StubDevice()
+    mapping.set_device(dev)
+    updates = 0
+    for values in replay_capture("example2_fastnet_data.txt"):
+        for path in values:
+            if path in mapping._BANDG_PERF_KEYS and values[path] is not None:
+                updates += 1
+            asyncio.run(mapping.process_channel(path))
+    perf_keys = {key for key, _, _ in mapping._BANDG_PERF_KEYS.values()}
+    sent = [msg for msg in dev.sent
+            if msg.PGN == 130824 and fval(msg, "key") in perf_keys]
+    assert updates > 100 and len(sent) == len(mapping._BANDG_PERF_KEYS)
+
+
+def test_perf_channels_encode_across_every_capture():
+    """Every VMG and next-tack value in the bundled captures fits its 16-bit key and
+    goes out in one CAN frame — including the downwind capture, where VMG is largest,
+    and headings above 180 deg, where a signed encoding would overflow."""
+    seen = 0
+    for capture in sorted(os.listdir(CAPTURES)):
+        for values in replay_capture(capture):
+            for path in values:
+                if path in mapping._BANDG_PERF_KEYS and values[path] is not None:
+                    _payload(mapping.trigger_n2k_frame(path))   # asserts a single frame
+                    seen += 1
+    assert seen > 900
 
 
 class _StubDevice:

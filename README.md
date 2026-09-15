@@ -189,7 +189,8 @@ error rather than a silent no-op, so a typo can't look like it worked.
 Suppression is per **PGN**, and some PGNs carry more than one kind of data:
 `--ignore-pgn 130306` silences apparent wind, true wind *and* TWD,
 `--ignore-pgn 130312` silences both sea *and* air temperature, and
-`--ignore-pgn 130824` silences all four raw sensor channels.
+`--ignore-pgn 130824` silences the four raw sensor channels *and* VMG and next-tack
+heading.
 
 The source address is **not** a flag — it is left to the `nmea2000` library, which
 picks a preferred address and resolves conflicts via ISO address claiming, then
@@ -225,12 +226,14 @@ the data out themselves.
 | Tidal set & drift | 129291 | 3 | reference per the instrument |
 | House battery voltage | 127508 | 6 | instance 0 |
 | Autopilot mode & target | 127237 | 2 | see note below |
+| VMG, next-tack heading | 130824 | 3 | B&G proprietary — see note below |
 | Raw boatspeed, heading, AWS, AWA | 130824 | 7 | B&G proprietary, full rate — see note below |
 
 The **Priority** column is each PGN's NMEA 2000 standard CAN priority (0 = highest,
 7 = lowest) — the values used unless you override them all with `--n2k-priority N`.
-130824 is proprietary and has no standard priority; it is sent at the lowest so its
-volume never delays navigation data.
+130824 is proprietary and has no standard priority. The performance channels use 3,
+which is what real B&G gear sends this PGN at; the raw channels use the lowest, so
+their volume never delays navigation data.
 
 > **Depth is below keel.** The B&G/H2000 applies its keel offset internally, so the
 > depth on the Fastnet wire is already **below-keel**. Fastnet never reports the
@@ -293,10 +296,29 @@ volume never delays navigation data.
 > - Fastnet actually carries **two** 16-bit values per raw channel; pyfastnet exposes
 >   only the first, so only that is sent. The second could follow later as a 4-byte
 >   value under the same key without breaking decoders that honour the length.
-> - Displays ignore keys they don't know. `--ignore-pgn 130824` turns them off.
+> - Displays ignore keys they don't know. `--ignore-pgn 130824` turns them off — and
+>   the performance channels below with them.
 >
 > The frame byte by byte, why it uses B&G's format, a decoder and references are in
 > [`docs/bandg_130824_raw_channels.md`](docs/bandg_130824_raw_channels.md).
+
+> **Performance channels (130824, B&G key-value data).** VMG and the heading on the
+> next tack have no standard PGN either, and go out in the same B&G key-value PGN —
+> under keys real B&G gear itself sends, so a B&G or Navico display on the bus can
+> show them natively.
+>
+> | Key | Data | Value |
+> |---|---|---|
+> | 127 (0x7F) | VMG to wind | 16-bit, 0.01 m/s |
+> | 154 (0x9A) | Heading on opposite tack | 16-bit, 0.0001 rad, 0–2π |
+>
+> - **Angles are unsigned 0–2π**, like a standard NMEA 2000 angle field. canboat's key
+>   table marks them signed, which is wrong — see the doc for the measurement. Getting
+>   this backwards puts any heading above 180° out by 15.5°.
+> - **VMG is a magnitude.** The H2000 drops the sign, so downwind VMG arrives positive;
+>   upwind or downwind is implied by the wind angle, never by this value.
+> - **Priority 3**, matching real B&G gear, and rate-capped like every other channel.
+>   One key per message, so each is a single CAN frame.
 
 Data arrives from pyfastnet 3.0 already in **SI** on Signal K paths, so it maps
 almost 1:1 onto NMEA 2000 — no unit conversion here (the raw sensor channels are
