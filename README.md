@@ -156,7 +156,7 @@ sudo systemctl restart fastnet2n2k
 ```
 
 Check which version you're on with `sudo pipx list --global --short` (prints e.g.
-`fastnet2n2k 3.4.1`). Releases are listed in the
+`fastnet2n2k 3.5.0`). Releases are listed in the
 [release history on PyPI](https://pypi.org/project/fastnet2n2k/#history).
 
 ## Command-line options
@@ -271,54 +271,45 @@ their volume never delays navigation data.
 >   they do nothing, since nothing here listens for commands. If that is unwanted, or
 >   another autopilot on the NMEA 2000 bus already sends 127237, use `--ignore-pgn 127237`.
 
-> **Raw sensor channels (130824, B&G key-value data).** The uncalibrated readings —
-> for logging, so calibration can be refitted later — have no standard PGN. They go
-> out in B&G's own proprietary key-value PGN, in B&G's layout: the B&G manufacturer
-> header (`7D 99`: code 381, marine), then a 12-bit key and 4-bit byte length, then
-> the value. B&G's keys are **Fastnet channel numbers** (canboat's `BANDG_KEY_VALUE`
-> table: 65 = Water Speed = 0x41, 127 = VMG = 0x7F, …), so each raw channel keeps its
-> own:
+> **B&G key-value data (130824).** Six channels have no standard NMEA 2000 PGN, so
+> they go out in B&G's own proprietary key-value PGN, in B&G's layout: the B&G
+> manufacturer header (`7D 99`: code 381, marine), then a 12-bit key and 4-bit byte
+> length, then the value. B&G's keys are **Fastnet channel numbers** (canboat's
+> `BANDG_KEY_VALUE` table: 65 = Water Speed = 0x41, …), so each channel keeps its own.
+> Every message carries one key and fits a single CAN frame. Displays ignore keys they
+> don't know, and `--ignore-pgn 130824` turns off all six.
 >
-> | Key | Fastnet channel |
-> |---|---|
-> | 66 (0x42) | Boatspeed (Raw) |
-> | 74 (0x4A) | Heading (Raw) |
-> | 78 (0x4E) | Apparent Wind Speed (Raw) |
-> | 82 (0x52) | Apparent Wind Angle (Raw) |
+> | Key | Fastnet channel | Value | Priority | Rate | For |
+> |---|---|---|---|---|---|
+> | 127 (0x7F) | Velocity Made Good | unsigned 16-bit, 0.01 m/s | 3 | capped | display |
+> | 154 (0x9A) | Heading on Next Tack | unsigned 16-bit, 0.0001 rad, 0–2π | 3 | capped | display |
+> | 66 (0x42) | Boatspeed (Raw) | signed 16-bit, unscaled | 7 | full | logging |
+> | 74 (0x4A) | Heading (Raw) | signed 16-bit, unscaled | 7 | full | logging |
+> | 78 (0x4E) | Apparent Wind Speed (Raw) | signed 16-bit, unscaled | 7 | full | logging |
+> | 82 (0x52) | Apparent Wind Angle (Raw) | signed 16-bit, unscaled | 7 | full | logging |
 >
-> - **Values are signed 16-bit, unscaled** — exactly as Fastnet carries them (format
->   0x0A), length 2. Heading and wind angle are binary angles (65536 = 360°); the
->   speeds are sensor counts. B&G gear has never been seen sending these four keys, so
->   this value format is ours.
-> - **One key per message**, which fits a single CAN frame; every update is sent, at
->   whatever rate the instruments produce it (about 70 frames/s for all four, ~4% of
->   the bus).
-> - Fastnet actually carries **two** 16-bit values per raw channel; pyfastnet exposes
->   only the first, so only that is sent. The second could follow later as a 4-byte
->   value under the same key without breaking decoders that honour the length.
-> - Displays ignore keys they don't know. `--ignore-pgn 130824` turns them off — and
->   the performance channels below with them.
->
-> The frame byte by byte, why it uses B&G's format, a decoder and references are in
-> [`docs/bandg_130824_raw_channels.md`](docs/bandg_130824_raw_channels.md).
-
-> **Performance channels (130824, B&G key-value data).** VMG and the heading on the
-> next tack have no standard PGN either, and go out in the same B&G key-value PGN —
-> under keys real B&G gear itself sends, so a B&G or Navico display on the bus can
-> show them natively.
->
-> | Key | Data | Value |
-> |---|---|---|
-> | 127 (0x7F) | VMG to wind | 16-bit, 0.01 m/s |
-> | 154 (0x9A) | Heading on opposite tack | 16-bit, 0.0001 rad, 0–2π |
->
+> **Performance channels (VMG, next-tack heading)** use keys real B&G gear itself
+> sends, so a B&G or Navico display on the bus can show them natively.
 > - **Angles are unsigned 0–2π**, like a standard NMEA 2000 angle field. canboat's key
 >   table marks them signed, which is wrong — see the doc for the measurement. Getting
 >   this backwards puts any heading above 180° out by 15.5°.
 > - **VMG is a magnitude.** The H2000 drops the sign, so downwind VMG arrives positive;
 >   upwind or downwind is implied by the wind angle, never by this value.
-> - **Priority 3**, matching real B&G gear, and rate-capped like every other channel.
->   One key per message, so each is a single CAN frame.
+>
+> **Raw sensor channels** are the uncalibrated readings, sent so calibration can be
+> refitted later from logged data. They are not for display.
+> - **Values are exactly as Fastnet carries them** (format 0x0A). Heading and wind
+>   angle are binary angles (65536 = 360°); the speeds are sensor counts. B&G gear has
+>   never been seen sending these four keys, so this value format is ours.
+> - **Every update is sent**, at whatever rate the instruments produce it (about
+>   70 frames/s for all four, ~4% of the bus).
+> - Fastnet actually carries **two** 16-bit values per raw channel; pyfastnet exposes
+>   only the first, so only that is sent. The second could follow later as a 4-byte
+>   value under the same key without breaking decoders that honour the length.
+>
+> The frames byte by byte, why they use B&G's format, the measurements behind the
+> performance-channel encoding, a decoder and references are in
+> [`docs/bandg_130824_raw_channels.md`](docs/bandg_130824_raw_channels.md).
 
 Data arrives from pyfastnet 3.0 already in **SI** on Signal K paths, so it maps
 almost 1:1 onto NMEA 2000 — no unit conversion here (the raw sensor channels are
