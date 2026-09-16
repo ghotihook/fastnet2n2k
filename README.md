@@ -206,9 +206,8 @@ detail.
 
 Each Fastnet channel is mapped to the matching PGN and emitted **only when the
 channel updates**, rate-capped at 0.05 s per path (the raw sensor channels are the
-exception: they go out at full rate). There is no periodic
-re-broadcast, so when the instruments go quiet the output stops and consumers time
-the data out themselves.
+exception: they go out at full rate). There is no periodic re-broadcast, so when the
+instruments go quiet the output stops and consumers time the data out themselves.
 
 | Data | PGN | Priority | Notes |
 |---|---|---|---|
@@ -226,14 +225,23 @@ the data out themselves.
 | Tidal set & drift | 129291 | 3 | reference per the instrument |
 | House battery voltage | 127508 | 6 | instance 0 |
 | Autopilot mode & target | 127237 | 2 | see note below |
-| VMG, next-tack heading | 130824 | 3 | B&G proprietary — see note below |
-| Raw boatspeed, heading, AWS, AWA | 130824 | 7 | B&G proprietary, full rate — see note below |
+| VMG, next-tack heading | 130824 | 3 | B&G key-value data — see note below |
+| Raw boatspeed, heading, AWS, AWA | 130824 | 7 | B&G key-value data, full rate — see note below |
 
 The **Priority** column is each PGN's NMEA 2000 standard CAN priority (0 = highest,
 7 = lowest) — the values used unless you override them all with `--n2k-priority N`.
-130824 is proprietary and has no standard priority. The performance channels use 3,
-which is what real B&G gear sends this PGN at; the raw channels use the lowest, so
-their volume never delays navigation data.
+130824 is proprietary and has no standard priority: VMG and next-tack heading use 3,
+which is what real B&G gear sends it at, and the raw channels use the lowest, so their
+volume never delays navigation data.
+
+Data arrives from pyfastnet already in **SI** on Signal K paths, so it maps almost 1:1
+onto NMEA 2000 — no unit conversion here (the raw sensor channels are sensor counts,
+and pass through as counts). **Sign** comes straight from the decoded value; **True
+vs Magnetic** is carried by the path (the B&G instrument's own reference — the Fastnet
+stream has no variation to convert). Encoding, CAN-ID construction, fast-packet
+framing and ISO address claiming (250 kbit/s, 29-bit IDs) are handled by the
+[`nmea2000`](https://github.com/tomer-w/nmea2000) library (canboat-based) on top of
+`python-can`'s socketcan backend.
 
 > **Depth is below keel.** The B&G/H2000 applies its keel offset internally, so the
 > depth on the Fastnet wire is already **below-keel**. Fastnet never reports the
@@ -301,8 +309,8 @@ their volume never delays navigation data.
 > - **Values are exactly as Fastnet carries them** (format 0x0A). Heading and wind
 >   angle are binary angles (65536 = 360°); the speeds are sensor counts. B&G gear has
 >   never been seen sending these four keys, so this value format is ours.
-> - **Every update is sent**, at whatever rate the instruments produce it (about
->   70 frames/s for all four, ~4% of the bus).
+> - **Every update is sent**, at whatever rate the instruments produce it — about
+>   70 frames/s for all four, ~4% of the bus.
 > - Fastnet actually carries **two** 16-bit values per raw channel; pyfastnet exposes
 >   only the first, so only that is sent. The second could follow later as a 4-byte
 >   value under the same key without breaking decoders that honour the length.
@@ -310,17 +318,6 @@ their volume never delays navigation data.
 > The frames byte by byte, why they use B&G's format, the measurements behind the
 > performance-channel encoding, a decoder and references are in
 > [`docs/bandg_130824_raw_channels.md`](docs/bandg_130824_raw_channels.md).
-
-Data arrives from pyfastnet 3.0 already in **SI** on Signal K paths, so it maps
-almost 1:1 onto NMEA 2000 — no unit conversion here (the raw sensor channels are
-sensor counts, and pass through as counts). **Sign** comes straight from the decoded
-value; **True vs Magnetic** is carried by the path (the B&G instrument's own
-reference — the Fastnet stream has no variation to convert).
-
-Encoding, CAN-ID construction, fast-packet framing and ISO address claiming (250
-kbit/s, 29-bit IDs) are handled by the
-[`nmea2000`](https://github.com/tomer-w/nmea2000) library (canboat-based) on top of
-`python-can`'s socketcan backend.
 
 > **WiFi gateways:** if you feed a WiFi NMEA 2000 gateway downstream, configure it
 > for **unicast** UDP, not broadcast — WiFi broadcast is unacknowledged and
@@ -349,14 +346,13 @@ candump -ta can1                                       # terminal 1
 fastnet2n2k --file capture.txt --channel can0          # terminal 2
 ```
 
-On the CoreMP135, the two FDCAN interfaces (SIT1051T transceivers) are exposed as
-`can0` (FDCAN1, PE3/PE10) and `can1` (FDCAN2, PG0/PE0).
+## Hardware notes
 
-## Hardware notes (M5Stack CoreMP135)
+### M5Stack CoreMP135
 
-The CoreMP135 runs Linux on an STM32MP135 and exposes its two FDCAN interfaces as
-the SocketCAN netdevs `can0` and `can1`. Bring up the second interface the same
-way if you need it:
+The CoreMP135 runs Linux on an STM32MP135 and exposes its two FDCAN interfaces
+(SIT1051T transceivers) as the SocketCAN netdevs `can0` (FDCAN1, PE3/PE10) and
+`can1` (FDCAN2, PG0/PE0). Bring up the second interface the same way if you need it:
 
 ```bash
 sudo ip link set can1 up type can bitrate 250000 restart-ms 100   # FDCAN2
@@ -406,9 +402,9 @@ python -m pytest tests/ -q
 
 The suite drives the mapping with the Fastnet captures in `tests/data/` and
 round-trips the resulting NMEA 2000 messages to assert PGNs, units, T/M references,
-sign passthrough, the autopilot mode sequence, the raw channels' B&G byte layout,
-the send throttle (and the raw channels' exemption from it), and the full
-file→decode→send pipeline.
+sign passthrough, the autopilot mode sequence, the B&G 130824 byte layout for the raw
+and performance channels (including the unsigned angle encoding), the send throttle
+(and the raw channels' exemption from it), and the full file→decode→send pipeline.
 
 ## Sender POC (`nmea2000_poc.py`)
 
