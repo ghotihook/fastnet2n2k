@@ -1,9 +1,11 @@
-# Raw sensor channels on NMEA 2000: B&G key-value data (PGN 130824)
+# B&G key-value data on NMEA 2000 (PGN 130824)
 
-**Status: shipped in 3.4.0.** fastnet2n2k sends the four raw (uncalibrated) Fastnet
-sensor channels onto the NMEA 2000 bus as B&G proprietary key-value data. This note
-describes the frame byte by byte, explains why it takes this form, and gives a
-decoder. The code is `_bandg_raw` in [`fastnet2n2k/mapping.py`](../fastnet2n2k/mapping.py).
+**Status: raw sensor channels shipped in 3.4.0; performance channels in 3.5.0.**
+fastnet2n2k sends two groups of Fastnet data onto the NMEA 2000 bus as B&G proprietary
+key-value data: the four raw (uncalibrated) sensor channels, for logging, and VMG and
+next-tack heading, for display. This note describes the frame byte by byte, explains
+why it takes this form, and gives a decoder. The code is `_bandg_raw` and
+`_bandg_perf` in [`fastnet2n2k/mapping.py`](../fastnet2n2k/mapping.py).
 
 ## What is sent
 
@@ -249,10 +251,11 @@ Things to know:
   Sending it needs a pyfastnet change. On the wire it would become a 4-byte value,
   length 4: the first number then the second, both signed 16-bit little-endian. That
   makes each message 8 bytes, which is two CAN frames.
-- **Performance channels.** The same PGN is how B&G processors carry target TWA, polar
-  performance, VMG, mast angle and more. The bridge decodes all of those but doesn't
-  send them. Sending them under B&G's own keys, in the value types canboat documents
-  for those keys [2], would let a B&G or Navico display on the bus show them directly.
+- **The remaining performance channels.** VMG and next-tack heading now go out (see
+  below), but the same PGN is also how B&G processors carry target TWA, polar
+  performance, mast angle and more. The bridge decodes those and still doesn't send
+  them. Adding them is the same three lines each, in the value types canboat
+  documents [2] — with the signedness caveat below.
 - **Recorder columns.** flightrecorder_n2k archives every CAN frame, so the raw frames
   are captured already. Turning them into columns needs a parser like the one above;
   `aws_raw`, `awa_raw` and `stw_raw` exist already (fed from NMEA 0183 XDR today),
@@ -298,3 +301,113 @@ three defects:
 8. canboat PGN database: definitions of the proprietary PGN ranges and the
    manufacturer code table (381 = B & G).
    <https://github.com/canboat/canboat/tree/master/database>
+
+
+---
+
+# Performance channels: VMG and next-tack heading
+
+**Status: shipped in 3.5.0.** The code is `_BANDG_PERF_KEYS` / `_bandg_perf` in
+[`fastnet2n2k/mapping.py`](../fastnet2n2k/mapping.py).
+
+## What is sent
+
+| Key | Fastnet channel | pyfastnet path | Value |
+|---|---|---|---|
+| 127 (0x7F) | Velocity Made Good (Knots) | `performance.velocityMadeGood` | 16-bit, 0.01 m/s |
+| 154 (0x9A) | Heading on Next Tack | `performance.tackMagnetic` | 16-bit, 0.0001 rad, 0–2π |
+
+Neither has a standard NMEA 2000 PGN. Unlike the raw channels above, these are keys
+**real B&G gear does send**, in value types canboat documents [2] — canboat's own B&G
+captures [4] contain both. So a B&G or Navico display on the bus can show them
+natively, and nothing about the format is invented here.
+
+As before, the key is simply the Fastnet channel number.
+
+## The frame
+
+A next-tack heading of 355°, and a VMG of 4.15 kn:
+
+```
+7d 99 9a 20 07 f2      key 154, length 2, value 61959  = 6.1959 rad = 355.0°
+7d 99 7f 20 d5 00      key 127, length 2, value   213  = 2.13 m/s  = 4.15 kn
+```
+
+Same header and same key/length packing as the raw channels. Both values are 16-bit,
+so each message is 6 payload bytes and therefore **a single CAN frame** — which also
+keeps them from interleaving multi-frame messages with the full-rate raw stream on the
+same PGN and source address.
+
+**Priority 3**, not the raw channels' 7: that is what real B&G gear sends this PGN at
+(all 19 of the 130824 messages in canboat's `bandg_tritonedge.raw` are priority 3).
+They are rate-capped by `MIN_SEND_INTERVAL` like every other channel; only the raw
+channels are exempt.
+
+## ⚠️ canboat marks the angle keys signed. They are not.
+
+canboat's `BANDG_KEY_VALUE` [2] gives key 154 — and every other angle key —
+`Signed: true`. **Following that puts any heading above 180° out by 15.5°**, because a
+signed reading of raw *r* is `r × 0.0001 − 6.5536` while the true value is
+`r × 0.0001`, and 2π is 6.2832, not 6.5536.
+
+The measurement. canboat's `bandg_tritonedge.raw` [4] carries both PGN 130824 and the
+**standard** PGN 130306 from the same B&G box. Key 157 is "Wind Angle to Mast", which
+130306's apparent wind angle should track:
+
+```
+10:39:46.213  key 157  raw=41816   unsigned=239.6°   signed=-135.9°
+10:39:46.245  130306                        AWA=240.3°
+10:39:46.458  key 157  raw=41756   unsigned=239.2°   signed=-136.2°
+10:39:46.445  130306                        AWA=240.2°
+10:39:46.710  key 157  raw=41835   unsigned=239.7°   signed=-135.8°
+10:39:46.696  130306                        AWA=240.3°
+```
+
+Unsigned tracks the standard PGN to about a degree; signed is 375° away. The
+resolution corroborates it: 2π / 0.0001 = 62832, which fits uint16 with room to spare
+— 0.0001 rad is the coarsest step that packs a full circle into 16 bits, exactly as
+the standard NMEA 2000 angle fields do it.
+
+So these keys are encoded like any other N2K angle, and `mapping.py`'s existing
+`_wrap()` applies unchanged. `tests/test_mapping.py::test_tack_heading_above_pi_stays_unsigned`
+guards it.
+
+This is worth a canboat issue; it has not been filed.
+
+## VMG is a magnitude, not a signed quantity
+
+VMG to windward is physically negative downwind — `boatspeed × cos(TWA)` with TWA past
+90°. **The H2000 does not send it that way: it drops the sign.**
+
+Measured on `tests/data/big_with_ap_actions.txt`, which is entirely downwind (TWA
+111–150°, 67 co-observed samples):
+
+| Hypothesis | mean error | stdev |
+|---|---|---|
+| VMG = \|boatspeed × cos(TWA)\| | −0.033 m/s | 0.050 |
+| VMG = boatspeed × cos(TWA) | **+2.850 m/s** | 0.826 |
+
+At TWA 118° with 2.46 m/s of boatspeed the signed quantity is −1.16 m/s and the
+instrument puts **+1.13** on the wire.
+
+So canboat's `Signed: false` on key 127 is **correct**, unlike its angle flags, and the
+`max(0.0, …)` in `_bandg_perf` is a guard that has never fired on any capture rather
+than a lossy choice. **For consumers: upwind or downwind is implied by the wind angle,
+never by this key's sign.**
+
+## Sending rules
+
+- **One key per message**, single CAN frame, as above.
+- **Rate-capped** at `MIN_SEND_INTERVAL` (0.05 s per path). These are display values;
+  the full-rate exemption is only for the raw logging channels.
+- **No "not available" value.** When a channel has no value, no message is sent. A
+  value that doesn't fit its 16-bit key isn't sent either, and a throttled warning is
+  logged.
+- **`--ignore-pgn 130824`** turns these off along with the four raw channels.
+
+## Verified
+
+`tests/test_mapping.py` asserts the frames byte for byte, the unsigned angle encoding,
+the VMG clamp, a canboat round-trip, and the rate cap. Replaying all eight bundled
+captures produces **953 messages, no value out of range, every one a single CAN
+frame** — raw 0–213 for key 127 and 349–62134 for key 154.
